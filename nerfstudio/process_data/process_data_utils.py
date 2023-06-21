@@ -288,6 +288,52 @@ def copy_and_upscale_polycam_depth_maps_list(
     CONSOLE.log("[bold green]:tada: Done upscaling depth maps.")
     return copied_depth_map_paths
 
+def copy_and_upscale_polycam_confidence_maps_list(
+    polycam_confidence_image_filenames: List[Path],
+    confidence_dir: Path,
+    crop_border_pixels: Optional[int] = None,
+    verbose: bool = False,
+) -> List[Path]:
+    """
+    Copy confidence maps to working location and upscale them to match the RGB images dimensions and finally crop them
+    equally as RGB Images.
+    Args:
+        polycam_confidence_image_filenames: List of Paths of images to copy to a new directory.
+        confidence_dir: Path to the output directory.
+        crop_border_pixels: If not None, crops each edge by the specified number of pixels.
+        verbose: If True, print extra logging.
+    Returns:
+        A list of the copied confidence maps paths.
+    """
+    confidence_dir.mkdir(parents=True, exist_ok=True)
+
+    # copy and upscale them to new directory
+    with status(msg="[bold yellow] Upscaling confidence maps...", spinner="growVertical", verbose=verbose):
+        upscale_factor = 2**POLYCAM_UPSCALING_TIMES
+        assert upscale_factor > 1
+        assert isinstance(upscale_factor, int)
+
+        copied_confidence_map_paths = []
+        for idx, confidence_map in enumerate(polycam_confidence_image_filenames):
+            destination = confidence_dir / f"frame_{idx + 1:05d}{confidence_map.suffix}"
+            ffmpeg_cmd = [
+                f'ffmpeg -y -i "{confidence_map}" ',
+                f"-q:v 2 -vf scale=iw*{upscale_factor}:ih*{upscale_factor}:flags=neighbor ",
+                f'"{destination}"',
+            ]
+            ffmpeg_cmd = " ".join(ffmpeg_cmd)
+            run_command(ffmpeg_cmd, verbose=verbose)
+            copied_confidence_map_paths.append(destination)
+
+    if crop_border_pixels is not None:
+        file_type = confidence_dir.glob("frame_*").__next__().suffix
+        filename = f"frame_%05d{file_type}"
+        crop = f"crop=iw-{crop_border_pixels * 2}:ih-{crop_border_pixels * 2}"
+        ffmpeg_cmd = f'ffmpeg -y -i "{confidence_dir / filename}" -q:v 2 -vf {crop} "{confidence_dir / filename}"'
+        run_command(ffmpeg_cmd, verbose=verbose)
+
+    CONSOLE.log("[bold green]:tada: Done upscaling confidence maps.")
+    return copied_confidence_map_paths
 
 def copy_images(
     data: Path, image_dir: Path, verbose, crop_factor: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)

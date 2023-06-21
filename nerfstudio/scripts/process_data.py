@@ -141,6 +141,8 @@ class ProcessPolycam(BaseConverterToNerfstudioDataset):
     """Number of pixels to crop from each border of the image. Useful as borders may be black due to undistortion."""
     use_depth: bool = False
     """If True, processes the generated depth maps from Polycam"""
+    use_confidence: bool = False
+    """If True, processes the generated confidence maps from Polycam"""
 
     def main(self) -> None:
         """Process images into a nerfstudio dataset."""
@@ -172,6 +174,10 @@ class ProcessPolycam(BaseConverterToNerfstudioDataset):
         if not (self.data / "keyframes" / "depth").exists():
             depth_dir = self.data / "keyframes" / "depth"
             raise ValueError(f"Depth map directory {depth_dir} doesn't exist")
+                
+        if not (self.data / "keyframes" / "confidence").exists():
+            confidence_dir = self.data / "keyframes" / "confidence"
+            raise ValueError(f"Confidence map directory {confidence_dir} doesn't exist")
 
         (image_processing_log, polycam_image_filenames) = polycam_utils.process_images(
             polycam_image_dir,
@@ -200,10 +206,27 @@ class ProcessPolycam(BaseConverterToNerfstudioDataset):
             )
             summary_log.extend(depth_processing_log)
 
+        polycam_confidence_filenames = []
+        if self.use_confidence:
+            polycam_confidence_image_dir = self.data / "keyframes" / "confidence"
+            confidence_dir = self.output_dir / "confidence"
+            confidence_dir.mkdir(parents=True, exist_ok=True)
+            (confidence_processing_log, polycam_confidence_filenames) = polycam_utils.process_confidence_maps(
+                polycam_confidence_image_dir,
+                confidence_dir,
+                num_processed_images=len(polycam_image_filenames),
+                crop_border_pixels=self.crop_border_pixels,
+                max_dataset_size=self.max_dataset_size,
+                num_downscales=self.num_downscales,
+                verbose=self.verbose,
+            )
+            summary_log.extend(confidence_processing_log)
+            
         summary_log.extend(
             polycam_utils.polycam_to_json(
                 image_filenames=polycam_image_filenames,
                 depth_filenames=polycam_depth_filenames,
+                confidence_filenames=polycam_confidence_filenames,
                 cameras_dir=polycam_cameras_dir,
                 output_dir=self.output_dir,
                 min_blur_score=self.min_blur_score,

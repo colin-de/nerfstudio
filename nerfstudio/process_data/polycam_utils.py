@@ -28,6 +28,7 @@ from nerfstudio.utils.rich_utils import CONSOLE
 def polycam_to_json(
     image_filenames: List[Path],
     depth_filenames: List[Path],
+    confidence_filenames: List[Path],
     cameras_dir: Path,
     output_dir: Path,
     min_blur_score: float = 0.0,
@@ -47,6 +48,7 @@ def polycam_to_json(
         Summary of the conversion.
     """
     use_depth = len(image_filenames) == len(depth_filenames)
+    use_confidence = len(image_filenames) == len(confidence_filenames)
     data = {}
     data["camera_model"] = CAMERA_MODELS["perspective"].value
     # Needs to be a string for camera_utils.auto_orient_and_center_poses
@@ -219,3 +221,69 @@ def process_depth_maps(
     )
 
     return summary_log, polycam_depth_maps_filenames
+
+
+def process_confidence_maps(
+    polycam_confidence_dir: Path,
+    confidence_dir: Path,
+    num_processed_images: int,
+    crop_border_pixels: int = 15,
+    max_dataset_size: int = 600,
+    num_downscales: int = 3,
+    verbose: bool = True,
+) -> Tuple[List[str], List[Path]]:
+    """
+    Process confidence maps from polycam only
+
+    Args:
+        polycam_confidence_dir: Path to the directory containing confidence maps
+        confidence_dir: Output directory for processed confidence maps
+        num_processed_images: Number of RGB processed that must match the number of confidence maps
+        crop_border_pixels: Number of pixels to crop from each border of the image. Useful as borders may be
+                            black due to undistortion.
+        max_dataset_size: Max number of images to train on. If the dataset has more, images will be sampled
+                         approximately evenly. If -1, use all images.
+        num_downscales: Number of times to downscale the images. Downscales by 2 each time. For example a value of 3
+                        will downscale the images by 2x, 4x, and 8x.
+        verbose: If True, print extra logging.
+    Returns:
+        summary_log: Summary of the processing.
+        polycam_confidence_maps_filenames: List of processed confidence maps paths
+    """
+    summary_log = []
+
+    polycam_confidence_maps_filenames, num_orig_confidence_maps = process_data_utils.get_image_filenames(
+        polycam_confidence_dir, max_dataset_size
+    )
+
+    # Copy confidence images to output directory
+    copied_confidence_maps_paths = process_data_utils.copy_and_upscale_polycam_confidence_maps_list(
+        polycam_confidence_maps_filenames, confidence_dir=confidence_dir, crop_border_pixels=crop_border_pixels, verbose=verbose
+    )
+
+    num_processed_confidence_maps = len(copied_confidence_maps_paths)
+
+    # assert same number of images as confidence maps
+    if num_processed_images != num_processed_confidence_maps:
+        raise ValueError(
+            f"Expected same amount of confidence maps as images. "
+            f"Instead got {num_processed_images} images and {num_processed_confidence_maps} confidence maps"
+        )
+
+    if crop_border_pixels > 0 and num_processed_confidence_maps != num_orig_confidence_maps:
+        summary_log.append(f"Started with {num_processed_confidence_maps} images out of {num_orig_confidence_maps} total")
+        summary_log.append(
+            "To change the size of the dataset add the argument --max_dataset_size to larger than the "
+            f"current value ({crop_border_pixels}), or -1 to use all images."
+        )
+    else:
+        summary_log.append(f"Started with {num_processed_confidence_maps} images")
+
+    # Downscale confidence maps
+    summary_log.append(
+        process_data_utils.downscale_images(
+            confidence_dir, num_downscales, folder_name="confidences", nearest_neighbor=True, verbose=verbose
+        )
+    )
+
+    return summary_log, polycam_confidence_maps_filenames

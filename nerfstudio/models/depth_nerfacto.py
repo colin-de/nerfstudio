@@ -80,11 +80,13 @@ class DepthNerfactoModel(NerfactoModel):
             metrics_dict["depth_loss"] = 0.0
             sigma = self._get_sigma().to(self.device)
             termination_depth = batch["depth_image"].to(self.device)
+            depth_confidence = batch['confidence_image'].to(self.device)
             for i in range(len(outputs["weights_list"])):
                 metrics_dict["depth_loss"] += depth_loss(
                     weights=outputs["weights_list"][i],
                     ray_samples=outputs["ray_samples_list"][i],
                     termination_depth=termination_depth,
+                    depth_confidence=depth_confidence,
                     predicted_depth=outputs["depth"],
                     sigma=sigma,
                     directions_norm=outputs["directions_norm"],

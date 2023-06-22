@@ -241,6 +241,42 @@ def ds_nerf_depth_loss(
     return torch.mean(loss)
 
 
+def ds_nerf_depth_conf_loss(
+    weights: Float[Tensor, "*batch num_samples 1"],
+    termination_depth: Float[Tensor, "*batch 1"],
+    steps: Float[Tensor, "*batch num_samples 1"],
+    lengths: Float[Tensor, "*batch num_samples 1"],
+    sigma: Float[Tensor, "0"],
+    depth_confidence: Float[Tensor, "0"],
+) -> Float[Tensor, "*batch 1"]:
+    """Depth loss from Depth-supervised NeRF (Deng et al., 2022).
+
+    Args:
+        weights: Weights predicted for each sample.
+        termination_depth: Ground truth depth of rays.
+        steps: Sampling distances along rays.
+        lengths: Distances between steps.
+        sigma: Uncertainty around depth values.
+    Returns:
+        Depth loss scalar.
+    """
+    depth_mask = termination_depth > 0
+
+    loss = -torch.log(weights + EPS) * torch.exp(-((steps - termination_depth[:, None]) ** 2) / (2 * sigma)) * lengths * depth_confidence[:, None]
+    # print(depth_confidence[:, None])
+    # print(depth_confidence[:, None].shape)
+    # Find the maximum value
+    # max_value = torch.max(depth_confidence[:, None])
+    # # Find the minimum value
+    # min_value = torch.min(depth_confidence[:, None])
+
+    # print("Maximum value:", max_value.item())
+    # print("Minimum value:", min_value.item())
+
+    loss = loss.sum(-2) * depth_mask
+    return torch.mean(loss)
+
+
 def urban_radiance_field_depth_loss(
     weights: Float[Tensor, "*batch num_samples 1"],
     termination_depth: Float[Tensor, "*batch 1"],
@@ -284,6 +320,7 @@ def depth_loss(
     weights: Float[Tensor, "*batch num_samples 1"],
     ray_samples: RaySamples,
     termination_depth: Float[Tensor, "*batch 1"],
+    depth_confidence: Float[Tensor, "*batch 1"],
     predicted_depth: Float[Tensor, "*batch 1"],
     sigma: Float[Tensor, "0"],
     directions_norm: Float[Tensor, "*batch 1"],
@@ -311,7 +348,8 @@ def depth_loss(
 
     if depth_loss_type == DepthLossType.DS_NERF:
         lengths = ray_samples.frustums.ends - ray_samples.frustums.starts
-        return ds_nerf_depth_loss(weights, termination_depth, steps, lengths, sigma)
+        # return ds_nerf_depth_loss(weights, termination_depth, steps, lengths, sigma)
+        return ds_nerf_depth_conf_loss(weights, termination_depth, steps, lengths, sigma, depth_confidence)
 
     if depth_loss_type == DepthLossType.URF:
         return urban_radiance_field_depth_loss(weights, termination_depth, predicted_depth, steps, sigma)

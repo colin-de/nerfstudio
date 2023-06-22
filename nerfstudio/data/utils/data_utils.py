@@ -84,3 +84,28 @@ def get_depth_image_from_path(
         image = image.astype(np.float64) * scale_factor
         image = cv2.resize(image, (width, height), interpolation=interpolation)
     return torch.from_numpy(image[:, :, np.newaxis])
+
+
+def get_confidence_image_from_path(
+    filepath: Path,
+    height: int,
+    width: int,
+    scale_factor: float,
+    interpolation: int = cv2.INTER_NEAREST,
+) -> torch.Tensor:
+    """Loads, rescales and resizes confidence images.
+
+    Args:
+        filepath: Path to confidence image.
+        height: Target confidence image height.
+        width: Target confidence image width.
+        scale_factor: Factor by which to scale confidence image.
+        interpolation: confidence value interpolation for resizing.
+
+    Returns:
+        confidence image torch tensor with shape [height, width, 1].
+    """
+    image = cv2.imread(str(filepath.absolute()), cv2.IMREAD_ANYDEPTH)
+    image = image.astype(np.float64) * scale_factor
+    image = cv2.resize(image, (width, height), interpolation=interpolation)
+    return torch.from_numpy(image[:, :, np.newaxis])

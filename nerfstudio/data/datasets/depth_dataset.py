@@ -21,6 +21,7 @@ from typing import Dict
 from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
 from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.data.utils.data_utils import get_depth_image_from_path
+from nerfstudio.data.utils.data_utils import get_confidence_image_from_path
 
 
 class DepthDataset(InputDataset):
@@ -42,6 +43,12 @@ class DepthDataset(InputDataset):
         self.depth_filenames = self.metadata["depth_filenames"]
         self.depth_unit_scale_factor = self.metadata["depth_unit_scale_factor"]
 
+        if (
+            "confidence_filenames" in dataparser_outputs.metadata.keys()
+            and dataparser_outputs.metadata["confidence_filenames"] is not None
+        ):
+            self.confidence_filenames = self.metadata["confidence_filenames"]
+
     def get_metadata(self, data: Dict) -> Dict:
         filepath = self.depth_filenames[data["image_idx"]]
         height = int(self._dataparser_outputs.cameras.height[data["image_idx"]])
@@ -52,5 +59,8 @@ class DepthDataset(InputDataset):
         depth_image = get_depth_image_from_path(
             filepath=filepath, height=height, width=width, scale_factor=scale_factor
         )
-
-        return {"depth_image": depth_image}
+        confidence_image = get_confidence_image_from_path(
+            filepath=filepath, height=height, width=width, scale_factor=scale_factor
+        )
+        return {"depth_image": depth_image,
+                "confidence_image": confidence_image}

@@ -262,14 +262,17 @@ def ds_nerf_depth_conf_loss(
     """
     depth_mask = termination_depth > 0
 
-    loss = -torch.log(weights + EPS) * torch.exp(-((steps - termination_depth[:, None]) ** 2) / (2 * sigma)) * lengths * depth_confidence[:, None]
+    loss = (
+        -torch.log(weights + EPS)
+        * torch.exp(-((steps - termination_depth[:, None]) ** 2) / (2 * sigma))
+        * lengths
+        * depth_confidence[:, None]
+    )
     # print(depth_confidence[:, None])
     # print(depth_confidence[:, None].shape)
-    # Find the maximum value
-    # max_value = torch.max(depth_confidence[:, None])
-    # # Find the minimum value
-    # min_value = torch.min(depth_confidence[:, None])
 
+    # max_value = torch.max(depth_confidence[:, None])
+    # min_value = torch.min(depth_confidence[:, None])
     # print("Maximum value:", max_value.item())
     # print("Minimum value:", min_value.item())
 

@@ -76,18 +76,22 @@ class ScanNet(DataParser):
         image_dir = self.config.data / "color"
         depth_dir = self.config.data / "depth"
         pose_dir = self.config.data / "pose"
+        confidence_dir = self.config.data / "confidence"
 
         img_dir_sorted = list(sorted(image_dir.iterdir(), key=lambda x: int(x.name.split(".")[0])))
         depth_dir_sorted = list(sorted(depth_dir.iterdir(), key=lambda x: int(x.name.split(".")[0])))
         pose_dir_sorted = list(sorted(pose_dir.iterdir(), key=lambda x: int(x.name.split(".")[0])))
+        confidence_dir_sorted = list(sorted(pose_dir.iterdir(), key=lambda x: int(x.name.split(".")[0])))
 
         first_img = cv2.imread(str(img_dir_sorted[0].absolute()))  # type: ignore
         h, w, _ = first_img.shape
 
-        image_filenames, depth_filenames, intrinsics, poses = [], [], [], []
+        image_filenames, depth_filenames, confidence_filenames, intrinsics, poses = [], [], [], [], []
 
         K = np.loadtxt(self.config.data / "intrinsic" / "intrinsic_color.txt")
-        for img, depth, pose in zip(img_dir_sorted, depth_dir_sorted, pose_dir_sorted):
+        for img, depth, pose, confidence in zip(
+            img_dir_sorted, depth_dir_sorted, pose_dir_sorted, confidence_dir_sorted
+        ):
             pose = np.loadtxt(pose)
             pose = np.array(pose).reshape(4, 4)
             pose[:3, 1] *= -1
@@ -101,6 +105,7 @@ class ScanNet(DataParser):
             intrinsics.append(K)
             image_filenames.append(img)
             depth_filenames.append(depth)
+            confidence_filenames.append(confidence)
 
         # filter image_filenames and poses based on train/eval split percentage
         num_images = len(image_filenames)
@@ -139,6 +144,7 @@ class ScanNet(DataParser):
         # Choose image_filenames and poses based on split, but after auto orient and scaling the poses.
         image_filenames = [image_filenames[i] for i in indices]
         depth_filenames = [depth_filenames[i] for i in indices] if len(depth_filenames) > 0 else []
+        confidence_filenames = [confidence_filenames[i] for i in indices] if len(confidence_filenames) > 0 else []
         intrinsics = intrinsics[indices.tolist()]
         poses = poses[indices.tolist()]
 
@@ -171,6 +177,7 @@ class ScanNet(DataParser):
             metadata={
                 "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
                 "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
+                "confidence_filenames": confidence_filenames if len(confidence_filenames) > 0 else None,
             },
         )
         return dataparser_outputs

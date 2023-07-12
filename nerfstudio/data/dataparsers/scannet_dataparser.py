@@ -110,6 +110,9 @@ class ScanNet(DataParser):
         i_train = np.linspace(
             0, num_images - 1, num_train_images, dtype=int
         )  # equally spaced training images starting and ending at 0 and num_images-1
+        if self.config.train_split_fraction == 0.54:
+            i_train = np.array([ 0,  2, 4,  6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32,
+        34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 61, 62, 63])
         i_eval = np.setdiff1d(i_all, i_train)  # eval images are the remaining images
         assert len(i_eval) == num_eval_images
         if split == "train":

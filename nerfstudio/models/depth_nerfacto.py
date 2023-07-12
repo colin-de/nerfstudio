@@ -68,7 +68,12 @@ class DepthNerfactoModel(NerfactoModel):
         else:
             self.depth_sigma = torch.tensor([self.config.depth_sigma])
 
-    def get_outputs(self, ray_bundle: RayBundle):
+    def get_outputs(self, ray_bundle: RayBundle, batch):
+        if batch is not None:
+            pass
+            # ray_bundle.fars = (batch["depth_image"] * 1.1).float().to("cuda:0")
+            # ray_bundle.nears = (batch["depth_image"] * 0.01).float().to("cuda:0")
+
         outputs = super().get_outputs(ray_bundle)
         if ray_bundle.metadata is not None and "directions_norm" in ray_bundle.metadata:
             outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
@@ -122,6 +127,12 @@ class DepthNerfactoModel(NerfactoModel):
         depth_mask = ground_truth_depth > 0
         metrics["depth_mse"] = float(
             torch.nn.functional.mse_loss(outputs["depth"][depth_mask], ground_truth_depth[depth_mask]).cpu()
+        )
+        metrics["depth_l1"] = float(
+            torch.nn.functional.l1_loss(outputs["depth"][depth_mask], ground_truth_depth[depth_mask]).cpu()
+        )
+        metrics["normal_cosine_similarity"] = float(
+            torch.nn.functional.cosine_similarity(outputs["pred_normals"], outputs["normals"]).mean().cpu().item()
         )
         return metrics, images
 

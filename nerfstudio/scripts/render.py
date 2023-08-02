@@ -61,6 +61,7 @@ from nerfstudio.utils import colormaps, install_checks
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.rich_utils import CONSOLE, ItersPerSecColumn
 from nerfstudio.utils.scripts import run_command
+import cv2
 
 
 def _render_trajectory_video(
@@ -149,19 +150,29 @@ def _render_trajectory_video(
                         )
                         sys.exit(1)
                     output_image = outputs[rendered_output_name]
-                    output_image = (
-                        colormaps.apply_colormap(
-                            image=output_image,
-                            colormap_options=colormap_options,
-                        )
-                        .cpu()
-                        .numpy()
-                    )
+                    # output_image = (
+                    #     colormaps.apply_colormap(
+                    #         image=output_image,
+                    #         colormap_options=colormap_options,
+                    #     )
+                    #     .cpu()
+                    #     .numpy()
+                    # )
+                    output_image = output_image.cpu().numpy()
+                    # Convert output_image from shape (873, 1144, 1) to shape (873, 1144, 3)
+                    # output_image = (
+                    #     np.repeat(output_image, 3, axis=2) if rendered_output_name == "depth" else output_image
+                    # )
                     render_image.append(output_image)
                 render_image = np.concatenate(render_image, axis=1)
                 if output_format == "images":
                     if image_format == "png":
-                        media.write_image(output_image_dir / f"{camera_idx:05d}.png", render_image, fmt="png")
+                        if rendered_output_name == "depth":
+                            depth_as_16_bit = np.asarray(render_image * 1000, np.uint16)
+
+                            cv2.imwrite(str(output_image_dir / f"{camera_idx:05d}.png"), depth_as_16_bit)
+                        else:
+                            media.write_image(output_image_dir / f"{camera_idx:05d}.png", render_image, fmt="png")
                     if image_format == "jpeg":
                         media.write_image(
                             output_image_dir / f"{camera_idx:05d}.jpg", render_image, fmt="jpeg", quality=jpeg_quality
@@ -451,6 +462,7 @@ class RenderInterpolated(BaseRender):
             assert pipeline.datamanager.eval_dataset is not None
             cameras = pipeline.datamanager.eval_dataset.cameras
         else:
+            # if self.pose_source == "train":
             assert pipeline.datamanager.train_dataset is not None
             cameras = pipeline.datamanager.train_dataset.cameras
 

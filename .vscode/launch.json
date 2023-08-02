@@ -13,14 +13,36 @@
       "console": "integratedTerminal",
       "args": [
         "depth-nerfacto",
+        // "nerfacto",
         "--pipeline.datamanager.camera-optimizer.mode", "off",
         "--vis","viewer",
         "--pipeline.model.predict-normals","True",
-        "--experiment-name","TUM_CAMP_20",
+        // "--experiment-name","TUM_CAMP_349",
+        "--experiment-name","TUM_CAMP_34",
         "scannet-data",
+        // "--train-split-fraction","0.0859",
         "--train-split-fraction","0.53",
+        // "--data", "data/TUM_CAMP/scene01",
         "--data", "data/TUM_CAMP/scene1_34",
         // "--max-num-iterations","30000",
+      ]
+    },
+    {
+      "name": "Python: Debug rendering",
+      "type": "python",
+      "request": "launch",
+      "python": "/home/workstationpatrick/anaconda3/envs/nerfstudio/bin/python",
+      "program": "nerfstudio/scripts/render.py",
+      "console": "integratedTerminal",
+      "args": [
+        "interpolate",
+        "--load-config", "outputs/TUM_CAMP_349/depth-nerfacto/2023-07-19_112222/config.yml",
+        "--output-format","images",
+        "--image-format","png",
+        "--pose-source", "train",
+        // "--rendered-output-names","depth",
+        "--colormap-options.normalize","False",
+        "--interpolation-steps", "1",
       ]
     },
     {

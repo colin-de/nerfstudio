@@ -19,9 +19,9 @@ Nerfacto augmented with depth supervision.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Tuple, Type
-
+from typing import Dict, List, Literal, Tuple, Type
 import torch
+from torch.nn import Parameter
 
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.model_components.losses import DepthLossType, depth_loss

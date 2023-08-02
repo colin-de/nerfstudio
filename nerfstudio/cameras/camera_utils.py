@@ -267,12 +267,23 @@ def get_interpolated_poses_many(
     if order_poses:
         poses, Ks = get_ordered_poses_and_k(poses, Ks)
 
-    for idx in range(poses.shape[0] - 1):
+    for idx in range(poses.shape[0]):
+        # for idx in range(poses.shape[0]):
         pose_a = poses[idx].cpu().numpy()
-        pose_b = poses[idx + 1].cpu().numpy()
+        if idx == poses.shape[0] - 1:
+            pose_b = poses[idx].cpu().numpy()
+        else:
+            pose_b = poses[idx + 1].cpu().numpy()
         poses_ab = get_interpolated_poses(pose_a, pose_b, steps=steps_per_transition)
         traj += poses_ab
-        k_interp += get_interpolated_k(Ks[idx], Ks[idx + 1], steps=steps_per_transition)
+
+        k_a = Ks[idx]
+        if idx == poses.shape[0] - 1:
+            k_b = Ks[idx]
+        else:
+            k_b = Ks[idx + 1]
+        # k_interp += get_interpolated_k(Ks[idx], Ks[idx + 1], steps=steps_per_transition)
+        k_interp += get_interpolated_k(k_a, k_b, steps=steps_per_transition)
 
     traj = np.stack(traj, axis=0)
     k_interp = torch.stack(k_interp, dim=0)

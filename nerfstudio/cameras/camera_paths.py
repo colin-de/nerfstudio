@@ -48,6 +48,8 @@ def get_interpolated_camera_path(cameras: Cameras, steps: int, order_poses: bool
         cy=Ks[0, 1, 2],
         camera_type=cameras.camera_type[0],
         camera_to_worlds=poses,
+        width=cameras.width[0],
+        height=cameras.height[0],
     )
     return cameras
 

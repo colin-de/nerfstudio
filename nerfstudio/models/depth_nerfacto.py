@@ -68,12 +68,7 @@ class DepthNerfactoModel(NerfactoModel):
         else:
             self.depth_sigma = torch.tensor([self.config.depth_sigma])
 
-    def get_outputs(self, ray_bundle: RayBundle, batch):
-        if batch is not None:
-            pass
-            # ray_bundle.fars = (batch["depth_image"] * 1.1).float().to("cuda:0")
-            # ray_bundle.nears = (batch["depth_image"] * 0.01).float().to("cuda:0")
-
+    def get_outputs(self, ray_bundle: RayBundle):
         outputs = super().get_outputs(ray_bundle)
         if ray_bundle.metadata is not None and "directions_norm" in ray_bundle.metadata:
             outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]

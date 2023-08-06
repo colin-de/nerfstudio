@@ -490,6 +490,14 @@ class VanillaDataManager(DataManager, Generic[TDataset]):
             self.train_dataset.cameras.to(self.device),
             self.train_camera_optimizer,
         )
+        # for loading full images
+        self.fixed_indices_train_dataloader = FixedIndicesEvalDataloader(
+            input_dataset=self.train_dataset,
+            device=self.device,
+            num_workers=self.world_size * 2,
+            shuffle=False,
+        )
+        self.iter_fixed_indices_train_dataloader = iter(self.fixed_indices_train_dataloader)
 
     def setup_eval(self):
         """Sets up the data loader for evaluation"""

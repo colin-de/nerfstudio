@@ -276,6 +276,23 @@ class NerfactoModel(Model):
         ray_samples: RaySamples
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
         field_outputs = self.field.forward(ray_samples, compute_normals=self.config.predict_normals)
+        # Extract the image indices from the tensor (first column)
+        image_indices = ray_bundle[:].camera_indices
+
+        # Find unique image indices and their counts
+        unique_image_indices, counts = torch.unique(image_indices, return_counts=True)
+
+        # Display the result
+        # for idx, count in zip(unique_image_indices, counts):
+        #     print(f"Image index {idx} has {count} items.")
+
+        # Find the indices where items have the same image index
+        indices_where_same = [torch.nonzero(image_indices == idx).flatten() for idx in unique_image_indices]
+
+        # Display the result
+        for idx, indices_list in zip(unique_image_indices, indices_where_same):
+            print(f"Image index {idx} appears at the following indices: {indices_list.tolist()}")
+
         if self.config.use_gradient_scaling:
             field_outputs = scale_gradients_by_distance_squared(field_outputs, ray_samples)
 

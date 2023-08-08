@@ -71,6 +71,9 @@ from nerfstudio.utils.misc import IterableWrapper
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.misc import get_orig_class
 
+from PIL import Image
+import numpy as np
+import os
 
 def variable_res_collate(batch: List[Dict]) -> Dict:
     """Default collate function for the cached dataloader.
@@ -534,15 +537,351 @@ class VanillaDataManager(DataManager, Generic[TDataset]):
             num_workers=self.world_size * 4,
         )
 
+    def arange_pixels(self, resolution=(128, 128), batch_size=1, image_range=(-1.0, 1.0), device=torch.device("cpu")):
+        """Arranges pixels for given resolution in range image_range.
+
+        The function returns the unscaled pixel locations as integers and the
+        scaled float values.
+
+        Args:
+            resolution (tuple): image resolution
+            batch_size (int): batch size
+            image_range (tuple): range of output points (default [-1, 1])
+            device (torch.device): device to use
+        """
+        h, w = resolution
+
+        # Arrange pixel location in scale resolution
+        pixel_locations = torch.meshgrid(torch.arange(0, h, device=device), torch.arange(0, w, device=device))
+        pixel_locations = (
+            torch.stack([pixel_locations[1], pixel_locations[0]], dim=-1).long().view(1, -1, 2).repeat(batch_size, 1, 1)
+        )
+        pixel_scaled = pixel_locations.clone().float()
+
+        # Shift and scale points to match image_range
+        scale = image_range[1] - image_range[0]
+        loc = (image_range[1] - image_range[0]) / 2
+        pixel_scaled[:, :, 0] = scale * pixel_scaled[:, :, 0] / (w - 1) - loc
+        pixel_scaled[:, :, 1] = scale * pixel_scaled[:, :, 1] / (h - 1) - loc
+        return pixel_locations, pixel_scaled
+
+    def to_pytorch(self, tensor, return_type=False):
+        """Converts input tensor to pytorch.
+
+        Args:
+            tensor (tensor): Numpy or Pytorch tensor
+            return_type (bool): whether to return input type
+        """
+        is_numpy = False
+        import numpy as np
+
+        if type(tensor) == np.ndarray:
+            tensor = torch.from_numpy(tensor)
+            is_numpy = True
+
+        tensor = tensor.clone()
+        if return_type:
+            return tensor, is_numpy
+        return tensor
+
+    def transform_to_world(
+        self, pixels, depth, camera_mat, world_mat=None, scale_mat=None, invert=True, device=torch.device("cuda")
+    ):
+        """Transforms pixel positions p with given depth value d to world coordinates.
+
+        Args:
+            pixels (tensor): pixel tensor of size B x N x 2
+            depth (tensor): depth tensor of size B x N x 1
+            camera_mat (tensor): camera matrix
+            world_mat (tensor): world matrix
+            scale_mat (tensor): scale matrix
+            invert (bool): whether to invert matrices (default: true)
+        """
+        assert pixels.shape[-1] == 2
+        if world_mat is None:
+            world_mat = torch.tensor(
+                [[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]], dtype=torch.float32, device=device
+            )
+        if scale_mat is None:
+            scale_mat = torch.tensor(
+                [[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]], dtype=torch.float32, device=device
+            )
+        # Convert to pytorch
+        pixels, is_numpy = self.to_pytorch(pixels, True)
+        depth = self.to_pytorch(depth).to(pixels.device)
+        camera_mat = self.to_pytorch(camera_mat).to(pixels.device)
+        world_mat = self.to_pytorch(world_mat)
+        scale_mat = self.to_pytorch(scale_mat)
+
+        # Invert camera matrices
+        if invert:
+            camera_mat = torch.inverse(camera_mat)
+            world_mat = torch.inverse(world_mat)
+            scale_mat = torch.inverse(scale_mat)
+
+        # Transform pixels to homogen coordinates
+        pixels = pixels.permute(0, 2, 1)
+        pixels = torch.cat([pixels, torch.ones_like(pixels)], dim=1)
+
+        # Project pixels into camera space
+        # pixels[:, :3] = pixels[:, :3] * depth.permute(0, 2, 1)
+        pixels_depth = pixels.clone()
+        pixels_depth[:, :3] = pixels[:, :3] * depth.permute(0, 2, 1)
+
+        # Transform pixels to world space
+        p_world = scale_mat @ world_mat @ camera_mat @ pixels_depth
+
+        # Transform p_world back to 3D coordinates
+        p_world = p_world[:, :3].permute(0, 2, 1)
+
+        if is_numpy:
+            p_world = p_world.numpy()
+        return p_world
+
+    def get_tensor_values(self, tensor, p, mode="nearest", scale=True, detach=True, detach_p=True, align_corners=False):
+        """
+        Returns values from tensor at given location p.
+
+        Args:
+            tensor (tensor): tensor of size B x C x H x W
+            p (tensor): position values scaled between [-1, 1] and
+                of size B x N x 2
+            mode (str): interpolation mode
+            scale (bool): whether to scale p from image coordinates to [-1, 1]
+            detach (bool): whether to detach the output
+            detach_p (bool): whether to detach p
+            align_corners (bool): whether to align corners for grid_sample
+        """
+
+        batch_size, _, h, w = tensor.shape
+
+        # p = pe.clone()
+        # p = pe
+        if detach_p:
+            p = p.detach()
+        if scale:
+            p[:, :, 0] = 2.0 * p[:, :, 0] / w - 1
+            p[:, :, 1] = 2.0 * p[:, :, 1] / h - 1
+        p = p.unsqueeze(1)
+        values = torch.nn.functional.grid_sample(tensor, p, mode=mode, align_corners=align_corners)
+        values = values.squeeze(2)
+
+        if detach:
+            values = values.detach()
+        values = values.permute(0, 2, 1)
+
+        return values
+
+    def project_to_cam(self, points, camera_mat, device):
+        """
+        points: (B, N, 3)
+        camera_mat: (B, 4, 4)
+        """
+        # breakpoint()
+        B, N, D = points.size()
+        points, is_numpy = self.to_pytorch(points, True)
+        points = points.permute(0, 2, 1)
+        points = torch.cat([points, torch.ones(B, 1, N, device=device)], dim=1)
+
+        xy_ref = camera_mat @ points
+
+        xy_ref = xy_ref[:, :3].permute(0, 2, 1)
+        xy_ref = xy_ref[..., :2] / xy_ref[..., 2:]
+
+        valid_points = xy_ref.abs().max(dim=-1)[0] <= 1
+        valid_mask = valid_points.unsqueeze(-1).bool()
+        if is_numpy:
+            xy_ref = xy_ref.numpy()
+        return xy_ref, valid_mask
+
+    def get_pc_loss(self, Xt, Yt):
+        # compute  error
+        match_method = "dense"
+        if match_method == "dense":
+            loss1 = self.comp_point_point_error(Xt[0].permute(1, 0), Yt[0].permute(1, 0))
+            loss2 = self.comp_point_point_error(Yt[0].permute(1, 0), Xt[0].permute(1, 0))
+            loss = loss1 + loss2
+        return loss
+
+    def comp_closest_pts_idx_with_split(self, pts_src, pts_des):
+        """
+        :param pts_src:     (3, S)
+        :param pts_des:     (3, D)
+        :param num_split:
+        :return:
+        """
+        pts_src_list = torch.split(pts_src, 500000, dim=1)
+        idx_list = []
+        for pts_src_sec in pts_src_list:
+            import numpy as np
+
+            diff = pts_src_sec[:, :, np.newaxis] - pts_des[:, np.newaxis, :]  # (3, S, 1) - (3, 1, D) -> (3, S, D)
+            dist = torch.linalg.norm(diff, dim=0)  # (S, D)
+            closest_idx = torch.argmin(dist, dim=1)  # (S,)
+            idx_list.append(closest_idx)
+        closest_idx = torch.cat(idx_list)
+        return closest_idx
+
+    def comp_point_point_error(self, Xt, Yt):
+        closest_idx = self.comp_closest_pts_idx_with_split(Xt, Yt)
+        pt_pt_vec = Xt - Yt[:, closest_idx]  # (3, S) - (3, S) -> (3, S)
+        pt_pt_dist = torch.linalg.norm(pt_pt_vec, dim=0)
+        eng = torch.mean(pt_pt_dist)
+        return eng
+
+    def get_rgb_s_loss(self, rgb1, rgb2, valid_points):
+        diff_img = (rgb1 - rgb2).abs()
+        diff_img = diff_img.clamp(0, 1)
+        compute_ssim_loss = SSIM().to("cuda")
+        ssim_map = compute_ssim_loss(rgb1, rgb2)
+        diff_img = 0.15 * diff_img + 0.85 * ssim_map
+        loss = self.mean_on_mask(diff_img, valid_points)
+        return loss
+
+    # compute mean value given a binary mask
+    def mean_on_mask(self, diff, valid_mask):
+        mask = valid_mask.expand_as(diff)
+        if mask.sum() > 0:
+            mean_value = (diff[mask]).sum() / mask.sum()
+            # mean_value = (diff * mask).sum() / mask.sum()
+        else:
+            print("============invalid mask==========")
+            mean_value = torch.tensor(0).float().cuda()
+        return mean_value
+
     def next_train(self, step: int) -> Tuple[RayBundle, Dict]:
         """Returns the next batch of data from the train dataloader."""
         self.train_count += 1
         image_batch = next(self.iter_train_image_dataloader)
+
+        image_idx_6_data = image_batch["image_idx"][0]
+        image_6_data = image_batch["image"][0]
+        depth_image_6_data = image_batch["depth_image"][0]
+
+        image_idx_5_data = image_batch["image_idx"][1]
+        image_5_data = image_batch["image"][1]
+        depth_image_5_data = image_batch["depth_image"][1]
+
+        Ks = self.train_dataset.cameras.get_intrinsics_matrices()
+        # K = Ks[image_idx_6_data].to(self.device)
+        import numpy as np
+
+        K_num = np.array(
+            [[2 * 702.0630 / 913, 0, 0, 0], [0, -2 * 701.9382 / 1138, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]
+        ).astype(np.float32)
+        K = torch.tensor(K_num, device=self.device)
+        print(K)
+        # K_h = torch.zeros((4, 4), device="cuda:0")
+        # K_h[:3, :3] = K
+        # K_h[3, 3] = 1.0
+        K = K.unsqueeze(0)
+        cam5 = self.train_dataset.cameras[image_idx_6_data].camera_to_worlds
+        cam6 = self.train_dataset.cameras[image_idx_5_data].camera_to_worlds
+
+        # Convert to homogeneous representation (4x4 matrix)
+        cam5_h = torch.cat([cam5, torch.tensor([[0.0, 0.0, 0.0, 1.0]])], dim=0).to(self.device)
+        cam6_h = torch.cat([cam6, torch.tensor([[0.0, 0.0, 0.0, 1.0]])], dim=0).to(self.device)
+        world_mat = torch.inverse(cam5_h).unsqueeze(0)
+
+        ref_Rt = torch.inverse(cam6_h).unsqueeze(0).to(self.device)
+        # ref_Rt = cam6_h.unsqueeze(0).to(self.device)
+
+        print(ref_Rt.shape)
+        d1 = depth_image_5_data.to(cam5_h.device)
+        d2 = depth_image_6_data.to(cam6_h.device)
+        img1 = image_5_data.to(cam5_h.device)
+        img2 = image_6_data.to(cam6_h.device)
+
+        # Rt_rel_12 = ref_Rt @ torch.inverse(cam5_h).to(self.device)
+        Rt_rel_12 = ref_Rt @ torch.inverse(world_mat).to(self.device)
+        # Rt_rel_12 = torch.inverse(ref_Rt) @ cam5_h.to(self.device)
+        # Rt_rel_12 = torch.eye(4).to(self.device)
+        # Rt_rel_12 = torch.inverse(cam5_h) @ torch.inverse(ref_Rt).to(self.device)
+        R_rel_12 = Rt_rel_12[:, :3, :3]
+        t_rel_12 = Rt_rel_12[:, :3, 3]
+
+        ratio = 8
+        h_depth, w_depth = d1.shape[1:]
+        h_depth, w_depth, _ = d1.shape
+
+        sample_resolution = (int(h_depth / ratio), int(w_depth / ratio))
+        pixel_locations, p_pc = self.arange_pixels(resolution=sample_resolution, device=self.device)
+        from torch.nn import functional as F
+
+        d1_reshaped = d1.permute(2, 0, 1).unsqueeze(0)
+        d2_reshaped = d2.permute(2, 0, 1).unsqueeze(0)
+        d1 = F.interpolate(d1_reshaped, sample_resolution, mode="nearest")
+        d2 = F.interpolate(d2_reshaped, sample_resolution, mode="nearest")
+        pc1 = self.transform_to_world(p_pc, d1.view(1, -1, 1), K)
+        pc2 = self.transform_to_world(p_pc, d2.view(1, -1, 1), K)
+        img1_reshaped = img1.permute(2, 0, 1).unsqueeze(0).to(self.device)
+        img2_reshaped = img2.permute(2, 0, 1).unsqueeze(0).to(self.device)
+        img1 = F.interpolate(img1_reshaped, sample_resolution, mode="bilinear")
+        img2 = F.interpolate(img2_reshaped, sample_resolution, mode="bilinear")
+        rgb_pc1 = self.get_tensor_values(
+            img1, p_pc, mode="bilinear", scale=False, detach=False, detach_p=False, align_corners=True
+        )
+        nl = 0.0001
+        pc1_rotated = pc1 @ R_rel_12.transpose(1, 2) + t_rel_12
+        mask_pc1_invalid = (-pc1_rotated[:, :, 2:] < nl).expand_as(pc1_rotated)
+        pc1_rotated[mask_pc1_invalid] = nl
+        pc1_rotated[mask_pc1_invalid] = nl
+        p_reprojected, valid_mask = self.project_to_cam(pc1_rotated, K, device=self.device)
+        p_reprojected = p_reprojected.to(img2.device)
+        rgb_pc1_proj = self.get_tensor_values(
+            img2, p_reprojected, mode="bilinear", scale=False, detach=False, detach_p=False, align_corners=True
+        )
+        rgb_pc1 = rgb_pc1.view(1, sample_resolution[0], sample_resolution[1], 3)
+        rgb_pc1_proj = rgb_pc1_proj.view(1, sample_resolution[0], sample_resolution[1], 3)
+        valid_mask = valid_mask.view(1, sample_resolution[0], sample_resolution[1], 1)
+
+        valid_points = valid_mask
+        X = pc1 @ R_rel_12.transpose(1, 2) + t_rel_12
+        Y = pc2
+
+        pc_loss = self.get_pc_loss(X, Y)
+        rgb_s_loss = self.get_rgb_s_loss(rgb_pc1, rgb_pc1_proj, valid_points)
+
+
+
+        Image.fromarray(((rgb_pc1[0] * 255).detach().cpu().numpy()).astype(np.uint8)).convert("RGB").save(
+            os.path.join("%04d_img1.png" % (5))
+        )
+        Image.fromarray(((rgb_pc1_proj[0] * 255).detach().cpu().numpy()).astype(np.uint8)).convert("RGB").save(
+            os.path.join("%04d_img2.png" % (6))
+        )
+
         assert self.train_pixel_sampler is not None
         assert isinstance(image_batch, dict)
         batch = self.train_pixel_sampler.sample(image_batch)
         ray_indices = batch["indices"]
+        # Extract the image indices from the tensor (first column)
+        image_indices = ray_indices[:, 0]
+
+        # Find unique image indices and their counts
+        unique_image_indices, counts = torch.unique(image_indices, return_counts=True)
+
+        # Display the result
+        for idx, count in zip(unique_image_indices, counts):
+            print(f"Image index {idx} has {count} items.")
+
         ray_bundle = self.train_ray_generator(ray_indices)
+        # Extract the image indices from the tensor (first column)
+        image_indices = ray_bundle[:].camera_indices
+
+        # Find unique image indices and their counts
+        unique_image_indices, counts = torch.unique(image_indices, return_counts=True)
+
+        # Display the result
+        # for idx, count in zip(unique_image_indices, counts):
+        #     print(f"Image index {idx} has {count} items.")
+
+        # Find the indices where items have the same image index
+        indices_where_same = [torch.nonzero(image_indices == idx).flatten() for idx in unique_image_indices]
+
+        # Display the result
+        for idx, indices_list in zip(unique_image_indices, indices_where_same):
+            print(f"Image index {idx} appears at the following indices: {indices_list.tolist()}")
         return ray_bundle, batch
 
     def next_eval(self, step: int) -> Tuple[RayBundle, Dict]:
@@ -587,3 +926,36 @@ class VanillaDataManager(DataManager, Generic[TDataset]):
             assert len(camera_opt_params) == 0
 
         return param_groups
+
+
+class SSIM(nn.Module):
+    """Layer to compute the SSIM loss between a pair of images"""
+
+    def __init__(self):
+        super(SSIM, self).__init__()
+        self.mu_x_pool = nn.AvgPool2d(3, 1)
+        self.mu_y_pool = nn.AvgPool2d(3, 1)
+        self.sig_x_pool = nn.AvgPool2d(3, 1)
+        self.sig_y_pool = nn.AvgPool2d(3, 1)
+        self.sig_xy_pool = nn.AvgPool2d(3, 1)
+
+        self.refl = nn.ReflectionPad2d(1)
+
+        self.C1 = 0.01**2
+        self.C2 = 0.03**2
+
+    def forward(self, x, y):
+        x = self.refl(x)
+        y = self.refl(y)
+
+        mu_x = self.mu_x_pool(x)
+        mu_y = self.mu_y_pool(y)
+
+        sigma_x = self.sig_x_pool(x**2) - mu_x**2
+        sigma_y = self.sig_y_pool(y**2) - mu_y**2
+        sigma_xy = self.sig_xy_pool(x * y) - mu_x * mu_y
+
+        SSIM_n = (2 * mu_x * mu_y + self.C1) * (2 * sigma_xy + self.C2)
+        SSIM_d = (mu_x**2 + mu_y**2 + self.C1) * (sigma_x + sigma_y + self.C2)
+
+        return torch.clamp((1 - SSIM_n / SSIM_d) / 2, 0, 1)

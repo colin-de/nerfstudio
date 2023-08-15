@@ -236,8 +236,8 @@ class ScanNet(DataParser):
             fy=intrinsics[:, 1, 1],
             cx=intrinsics[:, 0, 2],
             cy=intrinsics[:, 1, 2],
-            height=h,
-            width=w,
+            # height=h,
+            # width=w,
             camera_to_worlds=poses[:, :3, :4],
             camera_type=CameraType.PERSPECTIVE,
         )

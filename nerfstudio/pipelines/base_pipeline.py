@@ -296,6 +296,60 @@ class VanillaPipeline(Pipeline):
             step: current iteration step to update sampler if using DDP (distributed)
         """
         ray_bundle, batch = self.datamanager.next_train(step)
+        # image_batch = self.datamanager.next_bundle(step)
+
+        # indices = batch["indices"]
+        # camera_ids = indices[:, 0]
+
+        # unique_camera_ids, counts = torch.unique(camera_ids, return_counts=True)
+        # camera_id_count_dict = {int(uid.item()): int(c.item()) for uid, c in zip(unique_camera_ids, counts)}
+        # # print("Unique Camera IDs and their counts:", camera_id_count_dict)
+
+        # # Create a boolean mask where the camera_id is 0
+        # ref_cam_indice_mask = indices[:, 0] == 0
+
+        # # Find the indices where the mask is True
+        # indices_where_camera_id_is_0 = torch.nonzero(ref_cam_indice_mask).squeeze()
+        # # print("Indices where camera_id is 0:", indices_where_camera_id_is_0.tolist())
+
+        # # Use the boolean mask to filter the rows where camera_id is 0
+        # filtered_indices = indices[ref_cam_indice_mask]
+
+        # # Extract just the x, y coordinates from those filtered rows
+        # xy_coordinates = filtered_indices[:, 1:]
+
+        # # Convert the tensor to a list of tuples for easier reading, if needed
+        # xy_list = [tuple(coord.tolist()) for coord in xy_coordinates]
+        # # print("XY coordinates where camera_id is 0 (list of tuples):", xy_list)
+
+        # num_cam = int(self.datamanager.train_dataset.cameras.shape[0])
+        # # image_batch = self.datamanager.next_bundle(step)
+        # ref_img = image_batch["image"][0]
+        # # ref_depth = image_batch["depth_image"][0]
+        # # ref_depth_np = ref_depth.cpu().numpy()
+        # # np.save("ref_depth.npy", ref_depth_np)
+        # ref_intrinsics = self.datamanager.train_dataset.cameras.get_intrinsics_matrices()[0]
+        # # image_batch["intrinsics"] = ref_intrinsics
+        # ref_camera_to_world = self.datamanager.train_dataset.cameras.camera_to_worlds[0]
+        # depths_for_camera_id_0 = batch["depth_image"][indices_where_camera_id_is_0]
+        # # image_batch["camera_to_world"] = self.datamanager.train_dataset.cameras.camera_to_worlds
+        # device = torch.device("cuda:0")  # or "cpu"
+
+        # depths_for_camera_id_0 = depths_for_camera_id_0.to(device)
+        # ref_camera_to_world = ref_camera_to_world.to(device)
+        # ref_intrinsics = ref_intrinsics.to(device)
+        # xy_coordinates = xy_coordinates.to(device)
+        # ref_rgb = self.fetch_rgb_from_image(xy_coordinates, ref_img)
+        # world_coordinates = self.deproject_pixels_to_world(
+        #     depths_for_camera_id_0, ref_camera_to_world, ref_intrinsics, xy_coordinates
+        # )
+        # # print("World Coordinates:", world_coordinates)
+
+        # new_camera_to_world = self.datamanager.train_dataset.cameras.camera_to_worlds[1]
+        # projected_coordinates = self.project_world_to_pixels(world_coordinates, new_camera_to_world, ref_intrinsics)
+        # project_image = image_batch["image"][1]
+        # project_rgb_values = self.fetch_rgb_from_image(projected_coordinates, project_image)
+
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
 
@@ -313,6 +367,95 @@ class VanillaPipeline(Pipeline):
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
 
         return model_outputs, loss_dict, metrics_dict
+
+    def fetch_rgb_from_image(self, projected_coordinates, project_image):
+        """
+        Fetch the RGB values of pixels from an image at given coordinates.
+
+        Parameters:
+        - projected_coordinates (torch.Tensor): The 2D coordinates to fetch pixel values from. Shape [N, 2].
+        - project_image (torch.Tensor): The source image from which to fetch pixel values. Shape [H, W, 3].
+
+        Returns:
+        - torch.Tensor: The RGB values corresponding to the input coordinates. Shape [N, 3].
+        """
+
+        # Round the coordinates to the nearest integers
+        rounded_coordinates = torch.round(projected_coordinates).long()
+
+        # Clip the coordinates to be within valid range
+        rounded_coordinates[:, 0] = torch.clamp(rounded_coordinates[:, 0], 0, project_image.shape[1] - 1)
+        rounded_coordinates[:, 1] = torch.clamp(rounded_coordinates[:, 1], 0, project_image.shape[0] - 1)
+
+        # Move rounded_coordinates to the same device as project_image
+        rounded_coordinates = rounded_coordinates.to(project_image.device)
+
+        # Fetch the RGB values
+        rgb_values = project_image[rounded_coordinates[:, 1], rounded_coordinates[:, 0], :]
+
+        return rgb_values
+
+    def deproject_pixels_to_world(self, depths, camera_to_world, intrinsics, xy_coordinates):
+        device = depths.device
+        dtype = depths.dtype
+
+        camera_to_world = camera_to_world.to(device).to(dtype)
+        intrinsics = intrinsics.to(device).to(dtype)
+        xy_coordinates = xy_coordinates.to(device).to(dtype)
+
+        # Invert the intrinsics matrix
+        inv_intrinsics = torch.inverse(intrinsics[:3, :3])  # The intrinsics matrix is 3x3
+
+        # Homogenize the xy_coordinates
+        ones = torch.ones(xy_coordinates.shape[0], 1, device=device, dtype=dtype)
+        homogeneous_pixel_coordinates = torch.cat([xy_coordinates, ones], dim=1)
+
+        # Deproject to camera coordinates
+        camera_coordinates = depths * (homogeneous_pixel_coordinates @ inv_intrinsics.t())
+
+        # Extract rotation matrix and translation vector
+        R = camera_to_world[:3, :3]
+        t = camera_to_world[:3, 3]
+
+        # Convert to world coordinates
+        world_coordinates = camera_coordinates @ R.t() + t
+
+        return world_coordinates
+
+    def project_world_to_pixels(self, world_coordinates, new_camera_to_world, ref_intrinsics):
+        # Ensure all tensors are on the same device and dtype
+        device = world_coordinates.device
+        dtype = world_coordinates.dtype
+
+        new_camera_to_world = new_camera_to_world.to(device).to(dtype)
+        ref_intrinsics = ref_intrinsics.to(device).to(dtype)
+
+        # Homogenize world_coordinates to [x, y, z, 1]
+        homogeneous_world_coordinates = torch.cat(
+            [world_coordinates, torch.ones((world_coordinates.shape[0], 1), device=device, dtype=dtype)], dim=1
+        )
+
+        # Step 1: Transform world coordinates to new camera coordinates
+        # new_camera_to_world is a 3x4 matrix, so this multiplication should work
+        camera_coordinates = homogeneous_world_coordinates @ new_camera_to_world.t()
+
+        # Step 2: Project to 2D using the intrinsics
+        # Homogenize the camera coordinates by appending ones: [x, y, z] -> [x, y, z, 1]
+        homogeneous_camera_coordinates = torch.cat(
+            [camera_coordinates, torch.ones((camera_coordinates.shape[0], 1), device=device, dtype=dtype)], dim=1
+        )
+
+        # Remove last column (homogeneous coordinate) to make it a 3D point [x, y, z]
+        homogeneous_camera_coordinates = homogeneous_camera_coordinates[:, :3]
+
+        # Apply the intrinsics
+        projected_coordinates = homogeneous_camera_coordinates @ ref_intrinsics.t()
+
+        # Normalize by the depth (z-coordinate)
+        z = projected_coordinates[:, 2:3]
+        projected_coordinates = projected_coordinates[:, :2] / z
+
+        return projected_coordinates
 
     def forward(self):
         """Blank forward method

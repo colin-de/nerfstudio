@@ -5,6 +5,38 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Python: Debug depth-nerfacto",
+      "type": "python",
+      "request": "launch",
+      "python": "/home/workstationpatrick/anaconda3/envs/nerfstudio/bin/python",
+      "program": "nerfstudio/scripts/train.py",
+      "console": "integratedTerminal",
+      "args": [
+        "depth-nerfacto",
+        // "nerfacto",
+        // "--pipeline.datamanager.camera-optimizer.mode", "SO3xR3",
+        "--pipeline.model.depth-loss-mult","0.1",
+        "--pipeline.model.depth-loss-type","SPARSENERF_RANKING",
+        "--pipeline.datamanager.camera-optimizer.mode", "off",
+        "--vis","viewer",
+        "--pipeline.model.predict-normals","True",
+        // "--experiment-name","TUM_CAMP_349",
+        "--experiment-name","TUM_CAMP_10",
+        // "--experiment-name","bundle_00_test",
+        "--max-num-iterations","30000",
+
+        "scannet-data",
+        // "nerfstudio-data",
+        // "--train-split-fraction","0.0859",
+        "--train-split-fraction","0.2",
+        // "--data", "data/TUM_CAMP/scene01",
+        // "--data", "data/nerfstudio/poly_depth_conf",
+        // "--data", "data/nerfstudio/bundle_00",
+        // "--data", "data/bottle",
+        "--data", "data/TUM_CAMP/scene1_50",
+      ]
+    },
+    {
       "name": "Launch Chrome against localhost",
       "request": "launch",
       "type": "chrome",

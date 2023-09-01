@@ -100,7 +100,8 @@ class CacheDataloader(DataLoader):
         """Returns a list of batches from the dataset attribute."""
 
         assert isinstance(self.dataset, Sized)
-        indices = random.sample(range(len(self.dataset)), k=self.num_images_to_sample_from)
+        # indices = random.sample(range(len(self.dataset)), k=self.num_images_to_sample_from)
+        indices = range(len(self.dataset))
         batch_list = []
         results = []
 
@@ -244,6 +245,7 @@ class RandIndicesEvalDataloader(EvalDataloader):
 
     def __next__(self):
         # choose a random image index
-        image_idx = random.randint(0, len(self.cameras) - 1)
+        # image_idx = random.randint(0, len(self.cameras) - 1)
+        image_idx = range(0, len(self.cameras) - 1)
         ray_bundle, batch = self.get_data_from_image_idx(image_idx)
         return ray_bundle, batch

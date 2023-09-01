@@ -260,6 +260,18 @@ class DataManager(nn.Module):
         raise NotImplementedError
 
     @abstractmethod
+    def next_bundle(self, step: int):
+        """Returns the next batch of data from the train data manager.
+
+        Args:
+            step: the step number of the eval image to retrieve
+        Returns:
+            A tuple of the ray bundle for the image, and a dictionary of additional batch information
+            such as the groundtruth image.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def next_eval(self, step: int) -> Tuple[RayBundle, Dict]:
         """Returns the next batch of data from the eval data manager.
 
@@ -541,6 +553,13 @@ class VanillaDataManager(DataManager, Generic[TDataset]):
         ray_indices = batch["indices"]
         ray_bundle = self.train_ray_generator(ray_indices)
         return ray_bundle, batch
+
+    def next_bundle(self, step: int):
+        """Returns the next batch of data from the train dataloader."""
+        self.train_count += 1
+        image_batch = next(self.iter_train_image_dataloader)
+        assert isinstance(image_batch, dict)
+        return image_batch
 
     def next_eval(self, step: int) -> Tuple[RayBundle, Dict]:
         """Returns the next batch of data from the eval dataloader."""

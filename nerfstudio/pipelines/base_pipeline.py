@@ -373,9 +373,8 @@ class VanillaPipeline(Pipeline):
             ],
             device="cuda:0",
         ).double()  # This is used for testing
-        cam_0_to_world = (
-            self.convert_pose(self.datamanager.train_dataset.cameras.camera_to_worlds[0]).to(device).double()
-        )
+        # Convert from OpenGL to OpenCV coordinate system
+        cam_0_to_world = self.convert_pose(cam_to_world[0]).to(device).double()
         cam_0_world_coordinates = self.deproject_pixels_to_world(
             cam_0_depth, cam_0_to_world, intrinsics, cam_0_yx_coordinates
         )
@@ -423,8 +422,17 @@ class VanillaPipeline(Pipeline):
 
         projected_coordinates_0_1 = self.project_world_to_pixels(cam_0_world_coordinates, cam_1_to_world, intrinsics)
         projected_coordinates_0_2 = self.project_world_to_pixels(cam_0_world_coordinates, cam_2_to_world, intrinsics)
-        # project_image = image_batch["image"][1]
-        # project_rgb_values = self.fetch_rgb_from_image(projected_coordinates, project_image)
+        cam_1_img = images[1]
+        cam_2_img = images[2]
+        cam_1_depth = depths[1]
+        cam_2_depth = depths[2]
+        sample_rgb_cam_0 = self.fetch_rgb_from_image(cam_0_yx_coordinates, cam_0_img)
+        projected_rgb_cam_0_1 = self.fetch_rgb_from_image(projected_coordinates_0_1, cam_1_img)
+        projected_rgb_cam_0_2 = self.fetch_rgb_from_image(projected_coordinates_0_2, cam_2_img)
+        projected_depth_cam_0_1 = self.fetch_depth_from_image(projected_coordinates_0_1, cam_1_depth)
+        projected_depth_cam_0_2 = self.fetch_depth_from_image(projected_coordinates_0_2, cam_2_depth)
+
+        # TODO: Build Loss for Multiview Consistency Check
 
         ########################################################################################
         import matplotlib.pyplot as plt
@@ -559,6 +567,33 @@ class VanillaPipeline(Pipeline):
         rgb_values = project_image[rounded_coordinates[:, 1], rounded_coordinates[:, 0], :]
 
         return rgb_values
+
+    def fetch_depth_from_image(self, projected_coordinates, depth_image):
+        """
+        Fetch the depth values of pixels from an image at given coordinates.
+
+        Parameters:
+        - projected_coordinates (torch.Tensor): The 2D coordinates to fetch pixel values from. Shape [N, 2].
+        - depth_image (torch.Tensor): The source depth image from which to fetch pixel values. Shape [H, W, 1].
+
+        Returns:
+        - torch.Tensor: The depth values corresponding to the input coordinates. Shape [N, 1].
+        """
+
+        # Round the coordinates to the nearest integers
+        rounded_coordinates = torch.round(projected_coordinates).long()
+
+        # Clip the coordinates to be within valid range
+        rounded_coordinates[:, 0] = torch.clamp(rounded_coordinates[:, 0], 0, depth_image.shape[1] - 1)
+        rounded_coordinates[:, 1] = torch.clamp(rounded_coordinates[:, 1], 0, depth_image.shape[0] - 1)
+
+        # Move rounded_coordinates to the same device as depth_image
+        rounded_coordinates = rounded_coordinates.to(depth_image.device)
+
+        # Fetch the depth values
+        depth_values = depth_image[rounded_coordinates[:, 1], rounded_coordinates[:, 0], :]
+
+        return depth_values
 
     def deproject_pixels_to_world(self, cam_0_depth, cam_0_to_world, intrinsics, cam_0_yx_coordinates):
         device = cam_0_depth.device

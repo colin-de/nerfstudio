@@ -296,51 +296,74 @@ class VanillaPipeline(Pipeline):
             step: current iteration step to update sampler if using DDP (distributed)
         """
         ray_bundle, batch = self.datamanager.next_train(step)
+
+        # MULTIVIEW CONSISTENCY CHECK
         image_batch = self.datamanager.next_bundle(step)
         images = image_batch["image"]
         depths = image_batch["depth_image"]
-        num_cam = int(self.datamanager.train_dataset.cameras.shape[0])
+        image_shape = images.shape
+        num_cam, H, W = image_shape[0], image_shape[1], image_shape[2]
+        cam_to_world = self.datamanager.train_dataset.cameras.camera_to_worlds  # Shape: [N, 3, 4]
         intrinsics = self.datamanager.train_dataset.cameras.get_intrinsics_matrices()[0]
 
-        indices = batch["indices"]
+        indices = batch["indices"]  # Shape: [N, 3] [camera_id, y, x]
         camera_ids = indices[:, 0]
-
         unique_camera_ids, counts = torch.unique(camera_ids, return_counts=True)
         camera_id_count_dict = {int(uid.item()): int(c.item()) for uid, c in zip(unique_camera_ids, counts)}
         # print("Unique Camera IDs and their counts:", camera_id_count_dict)
 
         cam_0_indice_mask = indices[:, 0] == 0
         cam_1_indice_mask = indices[:, 0] == 1
-
+        cam_2_indice_mask = indices[:, 0] == 2
         indices_where_camera_id_is_0 = torch.nonzero(cam_0_indice_mask).squeeze()
         indices_where_camera_id_is_1 = torch.nonzero(cam_1_indice_mask).squeeze()
+        indices_where_camera_id_is_2 = torch.nonzero(cam_2_indice_mask).squeeze()
         # print("Indices where camera_id is 0:", indices_where_camera_id_is_0.tolist())
 
         # Use the boolean mask to filter the rows where camera_id is 0
         cam_0_indices = indices[cam_0_indice_mask]
         cam_0_yx_coordinates = cam_0_indices[:, 1:]
-        # cam_0_yx_coordinates = cam_0_yx_coordinates[:1, :]
+        # cam_0_yx_coordinates = cam_0_yx_coordinates[:1, :] # Take the first sample
         # cam_0_yx_coordinates = torch.tensor([360, 700], dtype=torch.float64, device="cuda:0").unsqueeze(0).double()
-        # cam_0_xy_coordinates = cam_0_yx_coordinates[:, [1, 0]]
-
+        # cam_0_xy_coordinates = cam_0_yx_coordinates[:, [1, 0]] # Flip the x and y coordinates
         # cam_0_xy_list = [tuple(coord.tolist()) for coord in cam_0_yx_coordinates]
         # print("XY coordinates where camera_id is 0 (list of tuples):", xy_list)
 
+        from collections import defaultdict
+
+        camera_indices_dict = defaultdict(list)
+        camera_yx_coordinates_dict = defaultdict(list)
+
+        # Find unique camera_ids
+        unique_camera_ids = torch.unique(indices[:, 0])
+
+        # Loop through each unique camera_id
+        for camera_id in unique_camera_ids:
+            # Create a boolean mask for the current camera_id
+            camera_indice_mask = indices[:, 0] == camera_id
+
+            # Find indices where camera_id matches the current camera_id
+            indices_where_camera_id_is_current = torch.nonzero(camera_indice_mask).squeeze()
+
+            # Use the boolean mask to filter the rows where camera_id matches
+            current_camera_indices = indices[camera_indice_mask]
+
+            # Extract yx_coordinates for the current camera_id
+            current_camera_yx_coordinates = current_camera_indices[:, 1:]
+
+            camera_indices_dict[camera_id.item()] = indices_where_camera_id_is_current
+            camera_yx_coordinates_dict[camera_id.item()] = current_camera_yx_coordinates
+
+        cam_0_yx_coordinates = camera_yx_coordinates_dict[0]
         cam_0_img = images[0]
         cam_0_depth = depths[0]
-        cam_0_to_world = self.datamanager.train_dataset.cameras.camera_to_worlds[0]
+        cam_0_to_world = cam_to_world[0]
         depths_for_camera_id_0 = batch["depth_image"][indices_where_camera_id_is_0]
 
         device = torch.device("cuda:0")  # or "cpu"
         depths_for_camera_id_0 = depths_for_camera_id_0.to(device)
         cam_0_to_world = cam_0_to_world.to(device)
         intrinsics = intrinsics.to(device)
-        # cam_0_yx_coordinates = cam_0_yx_coordinates.to(device)
-        # cam_0_rgb = self.fetch_rgb_from_image(cam_0_yx_coordinates, cam_0_img)
-        # cam_0_yx_coordinates[0] = ([647, 890])
-        # world_coordinates = self.deproject_pixels_to_world(
-        #     cam_0_depth[647, 890], cam_0_to_world, intrinsics, cam_0_yx_coordinates[0]
-        # )
 
         cam_0_to_world = torch.tensor(
             [
@@ -349,42 +372,13 @@ class VanillaPipeline(Pipeline):
                 [0.0299, -0.9970, -0.0717, -2.5307],
             ],
             device="cuda:0",
-        ).double()
+        ).double()  # This is used for testing
         cam_0_to_world = (
             self.convert_pose(self.datamanager.train_dataset.cameras.camera_to_worlds[0]).to(device).double()
         )
-        world_coordinates = self.deproject_pixels_to_world(
+        cam_0_world_coordinates = self.deproject_pixels_to_world(
             cam_0_depth, cam_0_to_world, intrinsics, cam_0_yx_coordinates
         )
-
-        ## THIS IS USED FOR DEBUGG
-        intrinsics = torch.tensor(
-            [[702.0630, 0.0000, 566.0000], [0.0000, 701.9382, 437.0000], [0.0000, 0.0000, 1.0000]], device="cuda:0"
-        ).double()
-
-        depth_value = torch.tensor(cam_0_depth[360, 700], device="cuda:0", dtype=torch.float64).double()
-
-        # Step 1: Create homogeneous coordinate
-        homogeneous_pixel_coordinates = torch.tensor([700, 360, 1], dtype=torch.float64, device="cuda:0").double()
-
-        # Step 2: Calculate the inverse of the intrinsic matrix
-        inv_intrinsics = torch.inverse(intrinsics.double())
-
-        # Step 3: Multiply by the inverse of the intrinsic and by the depth
-        cam_0_coordinates = torch.matmul(homogeneous_pixel_coordinates, inv_intrinsics.T) * depth_value
-
-        # Step 4: Convert to homogeneous coordinates in camera space
-        homogeneous_cam_coordinates_3D = torch.cat(
-            [cam_0_coordinates, torch.ones(1, dtype=torch.float64, device="cuda:0")]
-        )
-
-        # Step 5: Multiply by the camera-to-world matrix to get world coordinates
-        world_coordinates_verify = torch.matmul(homogeneous_cam_coordinates_3D, cam_0_to_world.T)
-
-        print("Deprojected 3D world coordinates:", world_coordinates_verify)
-
-        # Deal with Cam 1
-        # cam_1_to_world = self.datamanager.train_dataset.cameras.camera_to_worlds[1]
         cam_1_to_world = torch.tensor(
             [
                 [-0.4591, 0.1727, -0.8714, 1.2658],
@@ -392,43 +386,67 @@ class VanillaPipeline(Pipeline):
                 [0.0240, -0.9782, -0.2065, -2.4878],
             ],
             device="cuda:0",
+        ).double()  # This is used for testing
+        # cam_1_to_world = self.convert_pose(self.datamanager.train_dataset.cameras.camera_to_worlds[1])
+        # cam_2_to_world = self.convert_pose(self.datamanager.train_dataset.cameras.camera_to_worlds[2])
+        cam_1_to_world = self.convert_pose(cam_to_world[1])
+        cam_2_to_world = self.convert_pose(cam_to_world[2])
+        # THIS IS USED FOR DEBUGGING AND TESTING
+        #####################################################################
+        intrinsics_test = torch.tensor(
+            [[702.0630, 0.0000, 566.0000], [0.0000, 701.9382, 437.0000], [0.0000, 0.0000, 1.0000]], device="cuda:0"
         ).double()
-        cam_1_to_world = self.convert_pose(self.datamanager.train_dataset.cameras.camera_to_worlds[1])
-        projected_coordinates = self.project_world_to_pixels(world_coordinates, cam_1_to_world, intrinsics)
-
+        depth_value = torch.tensor(cam_0_depth[360, 700], device="cuda:0", dtype=torch.float64).double()
+        # Step 1: Create homogeneous coordinate
+        homogeneous_pixel_coordinates = torch.tensor([700, 360, 1], dtype=torch.float64, device="cuda:0").double()
+        # Step 2: Calculate the inverse of the intrinsic matrix
+        inv_intrinsics = torch.inverse(intrinsics_test.double())
+        # Step 3: Multiply by the inverse of the intrinsic and by the depth
+        cam_0_coordinates = torch.matmul(homogeneous_pixel_coordinates, inv_intrinsics.T) * depth_value
+        # Step 4: Convert to homogeneous coordinates in camera space
+        homogeneous_cam_coordinates_3D = torch.cat(
+            [cam_0_coordinates, torch.ones(1, dtype=torch.float64, device="cuda:0")]
+        )
+        # Step 5: Multiply by the camera-to-world matrix to get world coordinates
+        world_coordinates_verify = torch.matmul(homogeneous_cam_coordinates_3D, cam_0_to_world.T)
+        print("Deprojected 3D world coordinates:", world_coordinates_verify)
         homogeneous_world_coordinates = torch.cat(
             [world_coordinates_verify, torch.tensor([1.0], device=device, dtype=torch.float64)]
         )
         camera_coordinates = self.transform_world_to_camera(homogeneous_world_coordinates, cam_1_to_world)
-
         z = camera_coordinates[2]
         projected_coordinates_verify = camera_coordinates[:3] / z
-        projected_coordinates_verify = torch.matmul(projected_coordinates_verify, intrinsics.T)
-
-        # Get the final x, y coordinates in the image
+        projected_coordinates_verify = torch.matmul(projected_coordinates_verify, intrinsics_test.T)
         x, y = projected_coordinates_verify[0], projected_coordinates_verify[1]
         print("Projected coordinates verify:", x, y)
+        ###########################################################################################################
 
-        project_image = image_batch["image"][1]
+        projected_coordinates_0_1 = self.project_world_to_pixels(cam_0_world_coordinates, cam_1_to_world, intrinsics)
+        projected_coordinates_0_2 = self.project_world_to_pixels(cam_0_world_coordinates, cam_2_to_world, intrinsics)
+        # project_image = image_batch["image"][1]
         # project_rgb_values = self.fetch_rgb_from_image(projected_coordinates, project_image)
 
+        ########################################################################################
         import matplotlib.pyplot as plt
         import numpy as np
 
-        ########################################################################################
-        first_image_tensor = image_batch["image"][0].cpu().numpy()  # Convert to numpy array
-        second_image_tensor = image_batch["image"][1].cpu().numpy()  # Convert to numpy array
+        image_0_tensor = image_batch["image"][0].cpu().numpy()  # Convert to numpy array
+        image_1_tensor = image_batch["image"][1].cpu().numpy()  # Convert to numpy array
+        image_2_tensor = image_batch["image"][2].cpu().numpy()  # Convert to numpy array
 
         # Normalize the pixel values to the range [0, 1]
-        first_image_normalized = (first_image_tensor - np.min(first_image_tensor)) / (
-            np.max(first_image_tensor) - np.min(first_image_tensor)
+        first_image_normalized = (image_0_tensor - np.min(image_0_tensor)) / (
+            np.max(image_0_tensor) - np.min(image_0_tensor)
         )
-        second_image_normalized = (second_image_tensor - np.min(second_image_tensor)) / (
-            np.max(second_image_tensor) - np.min(second_image_tensor)
+        second_image_normalized = (image_1_tensor - np.min(image_1_tensor)) / (
+            np.max(image_1_tensor) - np.min(image_1_tensor)
+        )
+        third_image_normalized = (image_2_tensor - np.min(image_2_tensor)) / (
+            np.max(image_2_tensor) - np.min(image_2_tensor)
         )
 
         # Create a figure with subplots
-        fig, axs = plt.subplots(1, 2, figsize=(15, 10))
+        fig, axs = plt.subplots(1, 3, figsize=(20, 10))
 
         # Plot the first image and its projected coordinates
         axs[0].imshow(first_image_normalized)
@@ -439,10 +457,19 @@ class VanillaPipeline(Pipeline):
 
         # Plot the second image and its projected coordinates
         axs[1].imshow(second_image_normalized)
-        for i, (y, x) in enumerate(projected_coordinates):
-            axs[1].text(x, y, str(i), color="blue", fontsize=10, ha="center", va="center")
+        for i, (y, x) in enumerate(projected_coordinates_0_1):
+            if 0 <= y < H and 0 <= x < W:
+                axs[1].text(x, y, str(i), color="blue", fontsize=10, ha="center", va="center")
         axs[1].set_title("Second Image with Projected Coordinates")
         axs[1].axis("off")
+
+        # Plot the third image and its projected coordinates
+        axs[2].imshow(third_image_normalized)
+        for i, (y, x) in enumerate(projected_coordinates_0_2):
+            if 0 <= y < H and 0 <= x < W:
+                axs[2].text(x, y, str(i), color="green", fontsize=10, ha="center", va="center")
+        axs[2].set_title("Third Image with Projected Coordinates")
+        axs[2].axis("off")
 
         # Show the plots
         plt.tight_layout()

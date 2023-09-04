@@ -18,6 +18,7 @@
         "--pipeline.model.depth-loss-mult","0.01",
         // "--pipeline.model.depth-loss-type","SPARSENERF_RANKING",
         "--pipeline.datamanager.camera-optimizer.mode", "off",
+        "--pipeline.datamanager.train-num-rays-per-batch", "4096",
         "--vis","viewer",
         "--pipeline.model.predict-normals","True",
         // "--experiment-name","TUM_CAMP_349",

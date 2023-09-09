@@ -413,7 +413,16 @@ class PairPixelSampler(PixelSampler):  # pylint: disable=too-few-public-methods
                 rays_to_sample = batch_size // 2
 
             s = (rays_to_sample, 1)
-            ns = torch.randint(0, num_images, s, dtype=torch.long, device=device)
+            # ns = torch.randint(0, num_images, s, dtype=torch.long, device=device)
+            k = 500
+            # Generate k zeros
+            zeros = torch.zeros(k, dtype=torch.long, device=device)
+            non_zeros = torch.randint(1, num_images, (s[0] - k,), dtype=torch.long, device=device)
+            combined = torch.cat((zeros, non_zeros), dim=0)
+            indices_ = torch.randperm(s[0], device=device)
+            shuffled = combined[indices_]  # Shuffle the combined tensor
+            reshaped = shuffled.view(s[0], 1)  # Reshape to [s, 1]
+            ns = reshaped
             hs = torch.randint(self.radius, image_height - self.radius, s, dtype=torch.long, device=device)
             ws = torch.randint(self.radius, image_width - self.radius, s, dtype=torch.long, device=device)
             indices = torch.concat((ns, hs, ws), dim=1)

@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import colorsys
 import dataclasses
+import datetime
+import json
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as onp
@@ -25,6 +28,8 @@ import splines
 import splines.quaternion
 import viser
 import viser.transforms as tf
+
+from nerfstudio.viewer_beta.control_panel import ControlPanel
 
 
 @dataclasses.dataclass
@@ -256,7 +261,11 @@ class CameraPath:
         )
 
 
-def populate_render_tab(server: viser.ViserServer) -> None:
+def populate_render_tab(
+    server: viser.ViserServer, config_path: Path, datapath: Path, control_panel: ControlPanel
+) -> None:
+    from nerfstudio.viewer_beta.viewer import VISER_NERFSTUDIO_SCALE_RATIO
+
     fov_degrees = server.add_gui_slider(
         "FOV",
         initial_value=90.0,
@@ -283,13 +292,20 @@ def populate_render_tab(server: viser.ViserServer) -> None:
         min=(50, 50),
         max=(10_000, 10_000),
         step=1,
-        hint="Tension parameter for adjusting smoothness of spline interpolation.",
+        hint="Render output resolution in pixels.",
     )
 
     @resolution.on_update
     def _(_) -> None:
         """Update the aspect ratio for all cameras when the resolution changes."""
         camera_path.update_aspect(resolution.value[0] / resolution.value[1])
+
+    camera_type = server.add_gui_dropdown(
+        "Camera Type",
+        ("Perspective", "Fisheye", "Equirectangular"),
+        initial_value="Perspective",
+        hint="Camera model to render with.",
+    )
 
     add_button = server.add_gui_button(
         "Add keyframe",
@@ -415,12 +431,12 @@ def populate_render_tab(server: viser.ViserServer) -> None:
     playback_folder = server.add_gui_folder("Playback")
     with playback_folder:
         duration_number = server.add_gui_number("Duration (sec)", min=0.0, max=1e8, step=0.0001, initial_value=4.0)
-        framerate_slider = server.add_gui_slider("FPS", min=1.0, max=240.0, step=1e-8, initial_value=30.0)
+        framerate_number = server.add_gui_number("Frame rate (FPS)", min=0.1, max=240.0, step=1e-8, initial_value=30.0)
         framerate_buttons = server.add_gui_button_group("", ("24", "30", "60"))
 
         @framerate_buttons.on_click
         def _(_) -> None:
-            framerate_slider.value = float(framerate_buttons.value)
+            framerate_number.value = float(framerate_buttons.value)
 
         play_button = server.add_gui_button("Play", icon=viser.Icon.PLAYER_PLAY)
         pause_button = server.add_gui_button("Pause", icon=viser.Icon.PLAYER_PAUSE, visible=False)
@@ -438,7 +454,7 @@ def populate_render_tab(server: viser.ViserServer) -> None:
     def add_preview_frame_slider() -> Optional[viser.GuiInputHandle[int]]:
         """Helper for creating the current frame # slider. This is removed and
         re-added anytime the `max` value changes."""
-        max_frame_index = int(framerate_slider.value * duration_number.value) - 1
+        max_frame_index = int(framerate_number.value * duration_number.value) - 1
 
         if max_frame_index <= 0:
             return None
@@ -455,7 +471,7 @@ def populate_render_tab(server: viser.ViserServer) -> None:
 
         @preview_frame_slider.on_update
         def _(_) -> None:
-            max_frame_index = int(framerate_slider.value * duration_number.value) - 1
+            max_frame_index = int(framerate_number.value * duration_number.value) - 1
             maybe_pose_and_fov = camera_path.interpolate_pose_and_fov(
                 preview_frame_slider.value / max_frame_index if max_frame_index > 0 else 0
             )
@@ -494,7 +510,7 @@ def populate_render_tab(server: viser.ViserServer) -> None:
     preview_frame_slider = add_preview_frame_slider()
 
     @duration_number.on_update
-    @framerate_slider.on_update
+    @framerate_number.on_update
     def _(_) -> None:
         nonlocal preview_frame_slider
         old = preview_frame_slider
@@ -514,11 +530,11 @@ def populate_render_tab(server: viser.ViserServer) -> None:
 
         def play() -> None:
             while not play_button.visible:
-                max_frame = int(framerate_slider.value * duration_number.value)
+                max_frame = int(framerate_number.value * duration_number.value)
                 if max_frame > 0:
                     assert preview_frame_slider is not None
                     preview_frame_slider.value = (preview_frame_slider.value + 1) % max_frame
-                time.sleep(1.0 / framerate_slider.value)
+                time.sleep(1.0 / framerate_number.value)
 
         threading.Thread(target=play).start()
 
@@ -528,6 +544,72 @@ def populate_render_tab(server: viser.ViserServer) -> None:
         play_button.visible = True
         pause_button.visible = False
 
+    # add button for loading existing path
+    load_camera_path_button = server.add_gui_button(
+        "Load Path", icon=viser.Icon.FOLDER_OPEN, hint="Load an existing camera path."
+    )
+
+    @load_camera_path_button.on_click
+    def _(event: viser.GuiEvent) -> None:
+        assert event.client is not None
+        camera_path_dir = datapath / "camera_paths"
+        camera_path_dir.mkdir(parents=True, exist_ok=True)
+        preexisting_camera_paths = list(camera_path_dir.glob("*.json"))
+        preexisting_camera_filenames = [p.name for p in preexisting_camera_paths]
+
+        with event.client.add_gui_modal("Load Path") as modal:
+            if len(preexisting_camera_filenames) == 0:
+                event.client.add_gui_markdown("No existing paths found")
+            else:
+                event.client.add_gui_markdown("Select existing camera path:")
+                camera_path_dropdown = event.client.add_gui_dropdown(
+                    label="Camera Path",
+                    options=[str(p) for p in preexisting_camera_filenames],
+                    initial_value=str(preexisting_camera_filenames[0]),
+                )
+                load_button = event.client.add_gui_button("Load")
+
+                @load_button.on_click
+                def _(_) -> None:
+                    # load the json file
+                    json_path = datapath / "camera_paths" / camera_path_dropdown.value
+                    with open(json_path, "r") as f:
+                        json_data = json.load(f)
+
+                    keyframes = json_data["keyframes"]
+                    camera_path.reset()
+                    for i in range(len(keyframes)):
+                        frame = keyframes[i]
+                        pose = tf.SE3.from_matrix(onp.array(frame["matrix"]).reshape(4, 4))
+                        # apply the x rotation by 180 deg
+                        pose = tf.SE3.from_rotation_and_translation(
+                            pose.rotation() @ tf.SO3.from_x_radians(onp.pi), pose.translation()
+                        )
+                        camera_path.add_camera(
+                            Keyframe(
+                                position=pose.translation() * VISER_NERFSTUDIO_SCALE_RATIO,
+                                wxyz=pose.rotation().wxyz,
+                                override_fov_enabled=True,
+                                override_fov_value=frame["fov"] / 180.0 * onp.pi,
+                                aspect=frame["aspect"],
+                            ),
+                        )
+                    # update the render name
+                    render_name_text.value = json_path.stem
+                    camera_path.update_spline()
+                    modal.close()
+
+            cancel_button = event.client.add_gui_button("Cancel")
+
+            @cancel_button.on_click
+            def _(_) -> None:
+                modal.close()
+
+    # set the initial value to the current date-time string
+    now = datetime.datetime.now()
+    render_name_text = server.add_gui_text(
+        "Render Name", initial_value=now.strftime("%Y-%m-%d-%H-%M-%S"), hint="Name of the render"
+    )
     render_button = server.add_gui_button(
         "Generate Command",
         color="green",
@@ -537,10 +619,108 @@ def populate_render_tab(server: viser.ViserServer) -> None:
 
     @render_button.on_click
     def _(event: viser.GuiEvent) -> None:
-        """TODO: write the render JSON and show the render command."""
         assert event.client is not None
-        with event.client.add_gui_modal("TODO") as modal:
-            event.client.add_gui_markdown("TODO")
+        num_frames = int(framerate_number.value * duration_number.value)
+        json_data = {}
+        # json data has the properties:
+        # keyframes: list of keyframes with
+        # matrix : flattened 4x4 matrix
+        # fov: float in degrees
+        # aspect: float
+        # camera_type: string of camera type
+        # render_height: int
+        # render_width: int
+        # fps: int
+        # seconds: float
+        # is_cycle: bool
+        # smoothness_value: float
+        # camera_path: list of frames with properties
+        # camera_to_world: flattened 4x4 matrix
+        # fov: float in degrees
+        # aspect: float
+        # first populate the keyframes:
+        keyframes = []
+        for keyframe, dummy in camera_path._keyframes.values():
+            pose = tf.SE3.from_rotation_and_translation(
+                tf.SO3(keyframe.wxyz) @ tf.SO3.from_x_radians(onp.pi),
+                keyframe.position / VISER_NERFSTUDIO_SCALE_RATIO,
+            )
+            keyframes.append(
+                {
+                    "matrix": pose.as_matrix().flatten().tolist(),
+                    "fov": onp.rad2deg(keyframe.override_fov_value)
+                    if keyframe.override_fov_enabled
+                    else fov_degrees.value,
+                    "aspect": keyframe.aspect,
+                }
+            )
+        json_data["keyframes"] = keyframes
+        json_data["camera_type"] = camera_type.value.lower()
+        json_data["render_height"] = resolution.value[1]
+        json_data["render_width"] = resolution.value[0]
+        json_data["fps"] = framerate_number.value
+        json_data["seconds"] = duration_number.value
+        json_data["is_cycle"] = loop.value
+        json_data["smoothness_value"] = smoothness.value
+        # now populate the camera path:
+        camera_path_list = []
+        for i in range(num_frames):
+            maybe_pose_and_fov = camera_path.interpolate_pose_and_fov(i / num_frames)
+            if maybe_pose_and_fov is None:
+                return
+            pose, fov = maybe_pose_and_fov
+            # rotate the axis of the camera 180 about x axis
+            pose = tf.SE3.from_rotation_and_translation(
+                pose.rotation() @ tf.SO3.from_x_radians(onp.pi),
+                pose.translation() / VISER_NERFSTUDIO_SCALE_RATIO,
+            )
+            camera_path_list.append(
+                {
+                    "camera_to_world": pose.as_matrix().flatten().tolist(),
+                    "fov": onp.rad2deg(fov),
+                    "aspect": resolution.value[0] / resolution.value[1],
+                }
+            )
+        json_data["camera_path"] = camera_path_list
+        # finally add crop data if crop is enabled
+        if control_panel.crop_viewport:
+            obb = control_panel.crop_obb
+            rpy = tf.SO3.from_matrix(obb.R.numpy()).as_rpy_radians()
+            color = control_panel.background_color
+            json_data["crop"] = {
+                "crop_center": obb.T.tolist(),
+                "crop_scale": obb.S.tolist(),
+                "crop_rot": [rpy.roll, rpy.pitch, rpy.yaw],
+                "crop_bg_color": {"r": color[0], "g": color[1], "b": color[2]},
+            }
+
+        # now write the json file
+        json_outfile = datapath / "camera_paths" / f"{render_name_text.value}.json"
+        json_outfile.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_outfile.absolute(), "w") as outfile:
+            json.dump(json_data, outfile)
+        # now show the command
+        with event.client.add_gui_modal("Render Command") as modal:
+            dataname = datapath.name
+            command = " ".join(
+                [
+                    "ns-render camera-path",
+                    f"--load-config {config_path}",
+                    f"--camera-path-filename {json_outfile.absolute()}",
+                    f"--output-path renders/{dataname}/{render_name_text.value}.mp4",
+                ]
+            )
+            event.client.add_gui_markdown(
+                "\n".join(
+                    [
+                        "To render the trajectory, run the following from the command line:",
+                        "",
+                        "```",
+                        command,
+                        "```",
+                    ]
+                )
+            )
             close_button = event.client.add_gui_button("Close")
 
             @close_button.on_click
@@ -551,18 +731,3 @@ def populate_render_tab(server: viser.ViserServer) -> None:
     camera_path.default_fov = fov_degrees.value / 180.0 * onp.pi
 
     transform_controls: List[viser.SceneNodeHandle] = []
-
-
-def main() -> None:
-    """Launch a GUI with just the render panel, for development purposes."""
-    server = viser.ViserServer()
-    server.configure_theme(dark_mode=True, control_layout="collapsible")
-    server.world_axes.visible = True
-
-    populate_render_tab(server)
-    while True:
-        time.sleep(10.0)
-
-
-if __name__ == "__main__":
-    main()

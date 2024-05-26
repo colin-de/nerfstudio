@@ -33,38 +33,21 @@ import mediapy as media
 import numpy as np
 import torch
 import tyro
+import viser.transforms as tf
 from jaxtyping import Float
 from rich import box, style
 from rich.panel import Panel
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TaskProgressColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.table import Table
 from torch import Tensor
 from typing_extensions import Annotated
 
-import viser.transforms as tf
-
-from nerfstudio.cameras.camera_paths import (
-    get_interpolated_camera_path,
-    get_path_from_json,
-    get_spiral_path,
-)
-
+from nerfstudio.cameras.camera_paths import get_interpolated_camera_path, get_path_from_json, get_spiral_path
 from nerfstudio.cameras.cameras import Cameras, CameraType, RayBundle
-from nerfstudio.data.datamanagers.base_datamanager import (
-    VanillaDataManager,
-    VanillaDataManagerConfig,
-)
+from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManager, VanillaDataManagerConfig
+from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanagerConfig
 from nerfstudio.data.datamanagers.parallel_datamanager import ParallelDataManager
-from nerfstudio.data.datamanagers.random_cameras_datamanager import (
-    RandomCamerasDataManager,
-)
+from nerfstudio.data.datamanagers.random_cameras_datamanager import RandomCamerasDataManager
 from nerfstudio.data.datasets.base_dataset import Dataset
 from nerfstudio.data.scene_box import OrientedBox
 from nerfstudio.data.utils.dataloaders import FixedIndicesEvalDataloader
@@ -252,7 +235,7 @@ def _render_trajectory_video(
                 if render_nearest_camera:
                     assert train_dataset is not None
                     assert train_cameras is not None
-                    img = train_dataset.get_image(max_idx)
+                    img = train_dataset.get_image_float32(max_idx)
                     height = cameras.image_height[0]
                     # maintain the resolution of the img to calculate the width from the height
                     width = int(img.shape[1] * (height / img.shape[0]))
@@ -382,7 +365,7 @@ class CropData:
 
     background_color: Float[Tensor, "3"] = torch.Tensor([0.0, 0.0, 0.0])
     """background color"""
-    obb: OrientedBox = OrientedBox(R=torch.eye(3), T=torch.zeros(3), S=torch.ones(3) * 2)
+    obb: OrientedBox = field(default_factory=lambda: OrientedBox(R=torch.eye(3), T=torch.zeros(3), S=torch.ones(3) * 2))
     """Oriented box representing the crop region"""
 
     # properties for backwards-compatibility interface
@@ -736,11 +719,12 @@ class DatasetRender(BaseRender):
 
         def update_config(config: TrainerConfig) -> TrainerConfig:
             data_manager_config = config.pipeline.datamanager
-            assert isinstance(data_manager_config, VanillaDataManagerConfig)
+            assert isinstance(data_manager_config, (VanillaDataManagerConfig, FullImageDatamanagerConfig))
             data_manager_config.eval_num_images_to_sample_from = -1
             data_manager_config.eval_num_times_to_repeat_images = -1
-            data_manager_config.train_num_images_to_sample_from = -1
-            data_manager_config.train_num_times_to_repeat_images = -1
+            if isinstance(data_manager_config, VanillaDataManagerConfig):
+                data_manager_config.train_num_images_to_sample_from = -1
+                data_manager_config.train_num_times_to_repeat_images = -1
             if self.data is not None:
                 data_manager_config.data = self.data
             if self.downscale_factor is not None:
@@ -755,7 +739,7 @@ class DatasetRender(BaseRender):
             update_config_callback=update_config,
         )
         data_manager_config = config.pipeline.datamanager
-        assert isinstance(data_manager_config, VanillaDataManagerConfig)
+        assert isinstance(data_manager_config, (VanillaDataManagerConfig, FullImageDatamanagerConfig))
 
         for split in self.split.split("+"):
             datamanager: VanillaDataManager
@@ -822,9 +806,7 @@ class DatasetRender(BaseRender):
                         image_name = f"{camera_idx:05d}"
 
                         # Try to get the original filename
-                        image_name = (
-                            dataparser_outputs.image_filenames[camera_idx].with_suffix("").relative_to(images_root)
-                        )
+                        image_name = dataparser_outputs.image_filenames[camera_idx].relative_to(images_root)
 
                         output_path = self.output_path / split / rendered_output_name / image_name
                         output_path.parent.mkdir(exist_ok=True, parents=True)

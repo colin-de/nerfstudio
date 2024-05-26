@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import typing
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, cast
@@ -34,13 +36,15 @@ from typing_extensions import Annotated, Literal
 
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManager
+from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanager
 from nerfstudio.data.datamanagers.parallel_datamanager import ParallelDataManager
+from nerfstudio.data.datamanagers.random_cameras_datamanager import RandomCamerasDataManager
 from nerfstudio.data.scene_box import OrientedBox
 from nerfstudio.exporter import texture_utils, tsdf_utils
 from nerfstudio.exporter.exporter_utils import collect_camera_poses, generate_point_cloud, get_mesh_from_filename
 from nerfstudio.exporter.marching_cubes import generate_mesh_with_multires_marching_cubes
-from nerfstudio.fields.sdf_field import SDFField
-from nerfstudio.models.gaussian_splatting import GaussianSplattingModel
+from nerfstudio.fields.sdf_field import SDFField  # noqa
+from nerfstudio.models.splatfacto import SplatfactoModel
 from nerfstudio.pipelines.base_pipeline import Pipeline, VanillaPipeline
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.rich_utils import CONSOLE
@@ -104,12 +108,6 @@ class ExportPointCloud(Exporter):
     """Name of the depth output."""
     rgb_output_name: str = "rgb"
     """Name of the RGB output."""
-    use_bounding_box: bool = True
-    """Only query points within the bounding box"""
-    bounding_box_min: Optional[Tuple[float, float, float]] = (-1, -1, -1)
-    """Minimum of the bounding box, used if use_bounding_box is True."""
-    bounding_box_max: Optional[Tuple[float, float, float]] = (1, 1, 1)
-    """Maximum of the bounding box, used if use_bounding_box is True."""
 
     obb_center: Optional[Tuple[float, float, float]] = None
     """Center of the oriented bounding box."""
@@ -121,9 +119,9 @@ class ExportPointCloud(Exporter):
     """Number of rays to evaluate per batch. Decrease if you run out of memory."""
     std_ratio: float = 10.0
     """Threshold based on STD of the average distances across the point cloud to remove outliers."""
-    save_world_frame: bool = True
-    """If true, saves in the frame of the transform.json file, if false saves in the frame of the scaled 
-        dataparser transform"""
+    save_world_frame: bool = False
+    """If set, saves the point cloud in the same frame as the original dataset. Otherwise, uses the
+    scaled and reoriented coordinate space expected by the NeRF models."""
 
     def main(self) -> None:
         """Export point cloud."""
@@ -136,7 +134,10 @@ class ExportPointCloud(Exporter):
         validate_pipeline(self.normal_method, self.normal_output_name, pipeline)
 
         # Increase the batchsize to speed up the evaluation.
-        assert isinstance(pipeline.datamanager, (VanillaDataManager, ParallelDataManager))
+        assert isinstance(
+            pipeline.datamanager,
+            (VanillaDataManager, ParallelDataManager, FullImageDatamanager, RandomCamerasDataManager),
+        )
         assert pipeline.datamanager.train_pixel_sampler is not None
         pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = self.num_rays_per_batch
 
@@ -154,9 +155,6 @@ class ExportPointCloud(Exporter):
             rgb_output_name=self.rgb_output_name,
             depth_output_name=self.depth_output_name,
             normal_output_name=self.normal_output_name if self.normal_method == "model_output" else None,
-            use_bounding_box=self.use_bounding_box,
-            bounding_box_min=self.bounding_box_min,
-            bounding_box_max=self.bounding_box_max,
             crop_obb=crop_obb,
             std_ratio=self.std_ratio,
         )
@@ -317,7 +315,10 @@ class ExportPoissonMesh(Exporter):
         validate_pipeline(self.normal_method, self.normal_output_name, pipeline)
 
         # Increase the batchsize to speed up the evaluation.
-        assert isinstance(pipeline.datamanager, (VanillaDataManager, ParallelDataManager))
+        assert isinstance(
+            pipeline.datamanager,
+            (VanillaDataManager, ParallelDataManager, FullImageDatamanager, RandomCamerasDataManager),
+        )
         assert pipeline.datamanager.train_pixel_sampler is not None
         pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = self.num_rays_per_batch
 
@@ -337,9 +338,6 @@ class ExportPoissonMesh(Exporter):
             rgb_output_name=self.rgb_output_name,
             depth_output_name=self.depth_output_name,
             normal_output_name=self.normal_output_name if self.normal_method == "model_output" else None,
-            use_bounding_box=self.use_bounding_box,
-            bounding_box_min=self.bounding_box_min,
-            bounding_box_max=self.bounding_box_max,
             crop_obb=crop_obb,
             std_ratio=self.std_ratio,
         )
@@ -417,9 +415,7 @@ class ExportMarchingCubesMesh(Exporter):
 
         CONSOLE.print("Extracting mesh with marching cubes... which may take a while")
 
-        assert (
-            self.resolution % 512 == 0
-        ), f"""resolution must be divisible by 512, got {self.resolution}.
+        assert self.resolution % 512 == 0, f"""resolution must be divisible by 512, got {self.resolution}.
         This is important because the algorithm uses a multi-resolution approach
         to evaluate the SDF where the minimum resolution is 512."""
 
@@ -484,50 +480,144 @@ class ExportGaussianSplat(Exporter):
     Export 3D Gaussian Splatting model to a .ply
     """
 
+    obb_center: Optional[Tuple[float, float, float]] = None
+    """Center of the oriented bounding box."""
+    obb_rotation: Optional[Tuple[float, float, float]] = None
+    """Rotation of the oriented bounding box. Expressed as RPY Euler angles in radians"""
+    obb_scale: Optional[Tuple[float, float, float]] = None
+    """Scale of the oriented bounding box along each axis."""
+
+    @staticmethod
+    def write_ply(
+        filename: str,
+        count: int,
+        map_to_tensors: typing.OrderedDict[str, np.ndarray],
+    ):
+        """
+        Writes a PLY file with given vertex properties and a tensor of float or uint8 values in the order specified by the OrderedDict.
+        Note: All float values will be converted to float32 for writing.
+
+        Parameters:
+        filename (str): The name of the file to write.
+        count (int): The number of vertices to write.
+        map_to_tensors (OrderedDict[str, np.ndarray]): An ordered dictionary mapping property names to numpy arrays of float or uint8 values.
+            Each array should be 1-dimensional and of equal length matching 'count'. Arrays should not be empty.
+        """
+
+        # Ensure count matches the length of all tensors
+        if not all(len(tensor) == count for tensor in map_to_tensors.values()):
+            raise ValueError("Count does not match the length of all tensors")
+
+        # Type check for numpy arrays of type float or uint8 and non-empty
+        if not all(
+            isinstance(tensor, np.ndarray)
+            and (tensor.dtype.kind == "f" or tensor.dtype == np.uint8)
+            and tensor.size > 0
+            for tensor in map_to_tensors.values()
+        ):
+            raise ValueError("All tensors must be numpy arrays of float or uint8 type and not empty")
+
+        with open(filename, "wb") as ply_file:
+            # Write PLY header
+            ply_file.write(b"ply\n")
+            ply_file.write(b"format binary_little_endian 1.0\n")
+
+            ply_file.write(f"element vertex {count}\n".encode())
+
+            # Write properties, in order due to OrderedDict
+            for key, tensor in map_to_tensors.items():
+                data_type = "float" if tensor.dtype.kind == "f" else "uchar"
+                ply_file.write(f"property {data_type} {key}\n".encode())
+
+            ply_file.write(b"end_header\n")
+
+            # Write binary data
+            # Note: If this is a performance bottleneck consider using numpy.hstack for efficiency improvement
+            for i in range(count):
+                for tensor in map_to_tensors.values():
+                    value = tensor[i]
+                    if tensor.dtype.kind == "f":
+                        ply_file.write(np.float32(value).tobytes())
+                    elif tensor.dtype == np.uint8:
+                        ply_file.write(value.tobytes())
+
     def main(self) -> None:
         if not self.output_dir.exists():
             self.output_dir.mkdir(parents=True)
 
         _, pipeline, _, _ = eval_setup(self.load_config)
 
-        assert isinstance(pipeline.model, GaussianSplattingModel)
+        assert isinstance(pipeline.model, SplatfactoModel)
 
-        model: GaussianSplattingModel = pipeline.model
+        model: SplatfactoModel = pipeline.model
 
-        filename = self.output_dir / "point_cloud.ply"
+        filename = self.output_dir / "splat.ply"
 
-        map_to_tensors = {}
+        count = 0
+        map_to_tensors = OrderedDict()
 
         with torch.no_grad():
             positions = model.means.cpu().numpy()
-            map_to_tensors["positions"] = o3d.core.Tensor(positions, o3d.core.float32)
-            map_to_tensors["normals"] = o3d.core.Tensor(np.zeros_like(positions), o3d.core.float32)
+            count = positions.shape[0]
+            n = count
+            map_to_tensors["x"] = positions[:, 0]
+            map_to_tensors["y"] = positions[:, 1]
+            map_to_tensors["z"] = positions[:, 2]
+            map_to_tensors["nx"] = np.zeros(n, dtype=np.float32)
+            map_to_tensors["ny"] = np.zeros(n, dtype=np.float32)
+            map_to_tensors["nz"] = np.zeros(n, dtype=np.float32)
 
-            colors = model.colors.data.cpu().numpy()
-            map_to_tensors["colors"] = (colors * 255).astype(np.uint8)
-            for i in range(colors.shape[1]):
-                map_to_tensors[f"f_dc_{i}"] = colors[:, i : i + 1]
-
-            shs = model.shs_rest.data.cpu().numpy()
             if model.config.sh_degree > 0:
-                shs = shs.reshape((colors.shape[0], -1, 1))
-                for i in range(shs.shape[-1]):
-                    map_to_tensors[f"f_rest_{i}"] = shs[:, i]
+                shs_0 = model.shs_0.contiguous().cpu().numpy()
+                for i in range(shs_0.shape[1]):
+                    map_to_tensors[f"f_dc_{i}"] = shs_0[:, i, None]
+
+                # transpose(1, 2) was needed to match the sh order in Inria version
+                shs_rest = model.shs_rest.transpose(1, 2).contiguous().cpu().numpy()
+                shs_rest = shs_rest.reshape((n, -1))
+                for i in range(shs_rest.shape[-1]):
+                    map_to_tensors[f"f_rest_{i}"] = shs_rest[:, i, None]
+            else:
+                colors = torch.clamp(model.colors.clone(), 0.0, 1.0).data.cpu().numpy()
+                map_to_tensors["colors"] = (colors * 255).astype(np.uint8)
 
             map_to_tensors["opacity"] = model.opacities.data.cpu().numpy()
 
-            scales = model.scales.data.cpu().unsqueeze(-1).numpy()
+            scales = model.scales.data.cpu().numpy()
             for i in range(3):
-                map_to_tensors[f"scale_{i}"] = scales[:, i]
+                map_to_tensors[f"scale_{i}"] = scales[:, i, None]
 
-            quats = model.quats.data.cpu().unsqueeze(-1).numpy()
-
+            quats = model.quats.data.cpu().numpy()
             for i in range(4):
-                map_to_tensors[f"rot_{i}"] = quats[:, i]
+                map_to_tensors[f"rot_{i}"] = quats[:, i, None]
 
-        pcd = o3d.t.geometry.PointCloud(map_to_tensors)
+            if self.obb_center is not None and self.obb_rotation is not None and self.obb_scale is not None:
+                crop_obb = OrientedBox.from_params(self.obb_center, self.obb_rotation, self.obb_scale)
+                assert crop_obb is not None
+                mask = crop_obb.within(torch.from_numpy(positions)).numpy()
+                for k, t in map_to_tensors.items():
+                    map_to_tensors[k] = map_to_tensors[k][mask]
 
-        o3d.t.io.write_point_cloud(str(filename), pcd)
+                n = map_to_tensors["x"].shape[0]
+                count = n
+
+        # post optimization, it is possible have NaN/Inf values in some attributes
+        # to ensure the exported ply file has finite values, we enforce finite filters.
+        select = np.ones(n, dtype=bool)
+        for k, t in map_to_tensors.items():
+            n_before = np.sum(select)
+            select = np.logical_and(select, np.isfinite(t).all(axis=-1))
+            n_after = np.sum(select)
+            if n_after < n_before:
+                CONSOLE.print(f"{n_before - n_after} NaN/Inf elements in {k}")
+
+        if np.sum(select) < n:
+            CONSOLE.print(f"values have NaN/Inf in map_to_tensors, only export {np.sum(select)}/{n}")
+            for k, t in map_to_tensors.items():
+                map_to_tensors[k] = map_to_tensors[k][select]
+            count = np.sum(select)
+
+        ExportGaussianSplat.write_ply(str(filename), count, map_to_tensors)
 
 
 Commands = tyro.conf.FlagConversionOff[

@@ -1,6 +1,6 @@
 <p align="center">
     <!-- community badges -->
-    <a href="https://discord.gg/uMbNqcraFc"><img src="https://img.shields.io/badge/Join-Discord-blue.svg"/></a>
+    <a href="https://discord.gg/uMbNqcraFc"><img src="https://dcbadge.vercel.app/api/server/uMbNqcraFc?style=plastic"/></a>
     <!-- doc badges -->
     <a href='https://docs.nerf.studio/'>
         <img src='https://readthedocs.com/projects/plenoptix-nerfstudio/badge/?version=latest' alt='Documentation Status' /></a>
@@ -9,8 +9,6 @@
     <!-- code check badges -->
     <a href='https://github.com/nerfstudio-project/nerfstudio/actions/workflows/core_code_checks.yml'>
         <img src='https://github.com/nerfstudio-project/nerfstudio/actions/workflows/core_code_checks.yml/badge.svg' alt='Test Status' /></a>
-    <a href='https://github.com/nerfstudio-project/nerfstudio/actions/workflows/viewer_build_deploy.yml'>
-        <img src='https://github.com/nerfstudio-project/nerfstudio/actions/workflows/viewer_build_deploy.yml/badge.svg' alt='Viewer build Status' /></a>
     <!-- license badge -->
     <a href="https://github.com/nerfstudio-project/nerfstudio/blob/master/LICENSE">
         <img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
@@ -124,19 +122,10 @@ pip install --upgrade pip
 Install PyTorch with CUDA (this repo has been tested with CUDA 11.7 and CUDA 11.8) and [tiny-cuda-nn](https://github.com/NVlabs/tiny-cuda-nn).
 `cuda-toolkit` is required for building `tiny-cuda-nn`.
 
-For CUDA 11.7:
-
-```bash
-pip install torch==2.0.1+cu117 torchvision==0.15.2+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
-
-conda install -c "nvidia/label/cuda-11.7.1" cuda-toolkit
-pip install ninja git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
-```
-
 For CUDA 11.8:
 
 ```bash
-pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
 
 conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
 pip install ninja git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch

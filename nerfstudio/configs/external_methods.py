@@ -238,6 +238,51 @@ To enable SIGNeRF, you must install it first by running:
     )
 )
 
+# NeRF-SH
+external_methods.append(
+    ExternalMethod(
+        """[bold yellow]NeRF-SH[/bold yellow]
+For more information visit: https://docs.nerf.studio/nerfology/methods/nerf2gs2nerf.html
+
+To enable NeRF-SH, you must install it first by running:
+  [grey]pip install git+https://github.com/grasp-lyrl/NeRFtoGSandBack.git#subdirectory=nerfsh[/grey]""",
+        configurations=[
+            ("nerfsh", "NeRF-SH, used in paper"),
+        ],
+        pip_package="git+https://github.com/grasp-lyrl/NeRFtoGSandBack.git#subdirectory=nerfsh",
+    )
+)
+
+# NeRFGS
+external_methods.append(
+    ExternalMethod(
+        """[bold yellow]NeRFGS[/bold yellow]
+For more information visit: https://docs.nerf.studio/nerfology/methods/nerf2gs2nerf.html
+
+To enable NeRFGS, you must install it first by running:
+  [grey]pip install git+https://github.com/grasp-lyrl/NeRFtoGSandBack.git#subdirectory=nerfgs[/grey]""",
+        configurations=[
+            ("nerfgs", "NeRFGS, used in paper"),
+        ],
+        pip_package="git+https://github.com/grasp-lyrl/NeRFtoGSandBack.git#subdirectory=nerfgs",
+    )
+)
+
+# Splatfacto-W
+external_methods.append(
+    ExternalMethod(
+        """[bold yellow]Splatfacto-W[/bold yellow]
+For more information visit: https://docs.nerf.studio/nerfology/methods/splatw.html
+
+To enable Splatfacto-W, you must install it first by running:
+  [grey]pip install git+https://github.com/KevinXu02/splatfacto-w"[/grey]""",
+        configurations=[
+            ("splatfacto-w", "Splatfacto in the wild"),
+        ],
+        pip_package="git+https://github.com/KevinXu02/splatfacto-w",
+    )
+)
+
 
 @dataclass
 class ExternalMethodDummyTrainerConfig:
